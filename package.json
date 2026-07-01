@@ -1,0 +1,40 @@
+{
+  "name": "shimo-api-migration",
+  "version": "1.0.0",
+  "description": "Migrate Shimo documents to Feishu Drive using Shimo export APIs.",
+  "type": "module",
+  "bin": {
+    "shimo-migrate": "scripts/migrate.mjs",
+    "shimo-login": "scripts/login.mjs"
+  },
+  "scripts": {
+    "login": "node scripts/login.mjs",
+    "migrate": "node scripts/migrate.mjs",
+    "scope": "node scripts/scope_resolver.mjs",
+    "check": "node --check scripts/*.mjs",
+    "postinstall": "npx playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "scripts/",
+    "references/",
+    "README.md",
+    "SKILL.md",
+    "migration.config.example.json",
+    "LICENSE"
+  ],
+  "keywords": [
+    "shimo",
+    "feishu",
+    "lark",
+    "migration",
+    "documents",
+    "skill"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
