@@ -246,13 +246,6 @@ In Chinese docs or Chinese conversations, avoid naked English jargon. Use explan
 - `.gitignore` excludes cache, config, outputs, and token-like files.
 - This repository contains no personal migration data.
 
-## Roadmap
-
-- Batch concurrency and adaptive rate-limit scheduling.
-- More provider-specific verification endpoints for every Feishu object type.
-- Richer fallback doc rendering with native embedded media blocks where available.
-- Optional interactive CLI setup wizard; agent-guided flow remains primary.
-
 ## License
 
 MIT
