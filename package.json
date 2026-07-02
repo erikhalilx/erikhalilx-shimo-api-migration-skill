@@ -1,13 +1,17 @@
 {
   "name": "shimo-api-migration",
-  "version": "1.0.0",
-  "description": "Migrate Shimo documents to Feishu Drive using Shimo export APIs.",
+  "version": "1.0.1",
+  "description": "Agent-first Skill and CLI for migrating Shimo documents to Feishu/Lark Drive using Shimo export APIs.",
   "type": "module",
   "bin": {
     "shimo-migrate": "scripts/migrate.mjs",
-    "shimo-login": "scripts/login.mjs"
+    "shimo-login": "scripts/login.mjs",
+    "shimo-setup": "scripts/setup.mjs",
+    "shimo-doctor": "scripts/doctor.mjs"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "login": "node scripts/login.mjs",
     "migrate": "node scripts/migrate.mjs",
     "scope": "node scripts/scope_resolver.mjs",
@@ -20,7 +24,10 @@
   "files": [
     "scripts/",
     "references/",
+    "docs/",
     "README.md",
+    "INSTALL.md",
+    "AGENTS.md",
     "SKILL.md",
     "migration.config.example.json",
     "LICENSE"
@@ -31,8 +38,21 @@
     "lark",
     "migration",
     "documents",
-    "skill"
+    "skill",
+    "agent-skill",
+    "workbuddy-skill",
+    "claude-code",
+    "codex",
+    "trae"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erikhalilx/erikhalilx-shimo-api-migration-skill.git"
+  },
+  "homepage": "https://github.com/erikhalilx/erikhalilx-shimo-api-migration-skill#readme",
+  "bugs": {
+    "url": "https://github.com/erikhalilx/erikhalilx-shimo-api-migration-skill/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "playwright": "^1.61.1"

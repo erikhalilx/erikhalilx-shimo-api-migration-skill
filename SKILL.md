@@ -1,35 +1,47 @@
 ---
 name: shimo-api-migration
-version: 1.0.0
-description: Agent-first Shimo to Feishu migration assistant using Shimo export APIs. Guides users through scope confirmation, Feishu destination selection, dry run, safe execution, recovery, and fallback decisions.
-agents: [workbuddy, claude-code, codex, codex-cli, cursor, trae]
-tags: [shimo, feishu, lark, migration, documents]
+version: 1.0.1
+description: This skill should be used when the user wants to install or use an agent-guided Shimo to Feishu/Lark migration Skill from GitHub, migrate Shimo documents/folders/full accounts to Feishu Drive, preserve folder structure, run dry-run planning, resume interrupted migrations, retry failures, or execute user-approved fallback migration.
+agent_created: true
+agents: [workbuddy, claude-code, codex, codex-cli, trae]
+tags: [shimo, feishu, lark, migration, documents, agent-skill]
 license: MIT
 ---
 
 # Shimo API Migration
 
-Migrate Shimo documents to Feishu Drive using Shimo internal export APIs and Feishu OAuth `user_access_token`.
+Migrate Shimo documents to Feishu/Lark Drive through an agent-guided conversation. Treat this repository as an installable Skill package and treat CLI commands as deterministic execution helpers.
 
-This is an agent-first migration Skill. Treat the CLI as the execution engine, not the main product interface.
+This project is not an official Shimo or Feishu/Lark tool. It relies on Shimo internal export endpoints that may change without notice.
 
-This project is not an official Shimo or Feishu tool. It relies on Shimo internal export endpoints that may change.
+## Skill Installation Intent
+
+Install the whole GitHub repository as the Skill folder. Keep `SKILL.md`, `scripts/`, `references/`, `package.json`, and `migration.config.example.json` together.
+
+When a user sends the GitHub URL to Codex, Claude Code, WorkBuddy, Trae, or a similar agent:
+
+1. Review `README.md`, `INSTALL.md`, `AGENTS.md`, and this `SKILL.md`.
+2. Explain that npm alone installs only the CLI execution engine; the repository provides the Skill instructions and bundled resources.
+3. Clone/download the full repository.
+4. Run `npm run setup`.
+5. Run `npm run doctor`.
+6. Continue with the conversational workflow below.
+
+For detailed installation notes, read `references/agent_installation.md`.
 
 ## Non-Negotiable Safety Rules
 
-- Shimo source files are read-only. Never delete, rename, move, edit, overwrite, or otherwise modify any Shimo document, folder, or account content.
-- Existing Feishu user files are non-destructive. Never delete, rename, move, overwrite, or modify any pre-existing Feishu file/folder/document.
-- The tool may only create new Feishu folders/files/docx fallback documents inside the user-confirmed destination.
-- Before any command that writes to Feishu, explicitly confirm migration scope, destination, root folder name, fallback strategy, and output directory.
-- Do not reveal `app_secret`, tokens, cookies, sessions, real migration reports, private file names, or private links unless the user explicitly asks inside their own local environment.
-- Use OAuth `user_access_token`; do not use tenant-token/bot-owner permission repair flows.
-- Do not claim batch concurrency or adaptive global rate-limit scheduling is implemented in v1.0.
+- Treat Shimo source files as read-only. Never delete, rename, move, edit, overwrite, or otherwise modify any Shimo document, folder, or account content.
+- Treat existing Feishu/Lark user files as non-destructive. Never delete, rename, move, overwrite, or modify any pre-existing Feishu/Lark file/folder/document.
+- Create only new Feishu/Lark folders/files/docx fallback documents inside the user-confirmed destination.
+- Before any command that writes to Feishu/Lark, explicitly confirm migration scope, destination, root folder name, fallback strategy, and output directory.
+- Never reveal `app_secret`, tokens, cookies, sessions, real migration reports, private file names, or private links unless the user explicitly asks inside their own local environment.
+- Use OAuth user authorization. Do not use tenant-token or bot-owner permission repair flows.
+- Do not claim batch concurrency, adaptive global rate-limit scheduling, or fully verified Windows/Linux support in v1.0.1.
 
-## Terminology for Chinese Conversations
+## Chinese Conversation Terminology
 
-When speaking Chinese, prefer translated Chinese terms in user-facing replies. Do not use naked English jargon. If the English term is needed because it maps to a CLI option, use `English term（中文解释）` on first mention, then use the Chinese term afterwards.
-
-Preferred Chinese terms:
+When speaking Chinese, prefer translated terms. Do not use naked English jargon. If a CLI option requires an English term, use `English term（中文解释）` on first mention.
 
 - dry run → 预演（只生成迁移计划，不导出、不上传、不写飞书）
 - resume → 断点续跑（从上次中断状态继续）
@@ -39,26 +51,28 @@ Preferred Chinese terms:
 - token → 令牌（文件夹或授权标识，不要公开）
 - candidate → 候选项（等待用户决定如何处理的失败文件）
 
-## Default Agent-Guided Migration Workflow
+## Default Conversational Workflow
 
-When the user enters this Skill or says they want to migrate Shimo to Feishu, do not immediately run migration. Start by explaining the default behavior:
+Do not immediately run real migration. Guide the user step by step:
 
-1. The assistant first confirms the migration scope in natural language.
-2. The assistant confirms the Feishu destination: existing folder, new folder under My Space root, or new folder under an existing folder.
-3. The assistant checks credentials and login status.
-4. The assistant runs dry run（预演/只生成迁移计划，不写飞书）first.
-5. The assistant explains the dry-run result and asks for confirmation before writing to Feishu.
-6. If the task is interrupted, the assistant auto-resumes（自动断点续跑）when the saved state clearly matches the same task.
-7. If a specific file fails once, the tool automatically performs one second API attempt.
-8. If the second attempt fails, the file is marked as a decision candidate. The migration continues; do not interrupt the whole task.
-9. Files that are clearly unsupported by the API are skipped from API attempts and recorded as fallback candidates.
-10. At the end, the assistant reports failed/fallback candidates and lets the user choose retry（重试）, fallback（兜底迁移）, or skip（放弃迁移）per file or per subset.
+1. Explain the safety baseline and that the first execution is a dry run（预演）.
+2. Confirm Shimo migration scope in natural language.
+3. Confirm Feishu/Lark destination: existing folder, new folder under My Space root, or new folder under an existing folder.
+4. Check installation and environment with `npm run doctor`.
+5. Check Feishu/Lark credentials and Shimo login status.
+6. Run scan/scope resolution or dry run to produce a migration plan.
+7. Explain the interpreted scope, destination plan, unsupported files, and whether the next action writes to Feishu/Lark.
+8. Ask for explicit confirmation before real migration.
+9. During migration, explain progress and whether the run is resumed from state.
+10. At the end, report successes, failures, retry candidates, fallback candidates, and next choices.
+
+For detailed user-facing phrasing, read `references/agent_conversation_workflow.md`.
 
 ## Migration Scope Selection
 
-Do not make Shimo type selection (`newdoc`, `mosheet`, `mindmap`) the primary user-facing flow. Users think in paths, files, spaces, and links.
+Do not make type selection (`newdoc`, `mosheet`, `mindmap`) the primary user-facing flow. Users think in paths, folders, files, spaces, and links.
 
-Ask the user to describe the scope naturally, for example:
+Ask for scope naturally, for example:
 
 - 全部迁移
 - 只迁移“企业空间/项目资料/2024复盘”
@@ -66,50 +80,32 @@ Ask the user to describe the scope naturally, for example:
 - 迁移“投放素材库”和“红书 SOP”两个文件夹
 - 排除“归档”“历史备份”“测试文件”
 
-Agent process:
+Process:
 
 1. Run scan or dry run to obtain the file list.
-2. Translate the user's natural language into include/exclude rules.
-3. Use `scripts/scope_resolver.mjs` to generate a selected file list.
+2. Translate user scope into include/exclude rules.
+3. Run `scripts/scope_resolver.mjs` to generate a selected file list.
 4. Explain the interpreted scope back to the user.
 5. Ask for confirmation.
 6. Run migration with `--file-list <selected_file_list.json>` only after confirmation.
 
-Scope resolver examples:
+`--types` is advanced/debug only. Do not lead normal users with it.
 
-```bash
-npm run scope -- --file-list outputs/migration/shimo_file_list.json --include "企业空间/项目资料" --exclude "归档" --output outputs/migration/selected_file_list.json --explain
-npm run migrate -- --file-list outputs/migration/selected_file_list.json --dry-run
-```
-
-`--types` remains available only as an advanced/debug option. Do not lead normal users with it.
-
-## Feishu Destination Selection
+## Feishu/Lark Destination Selection
 
 Ask where migrated content should land:
 
-1. Existing Feishu folder:
-   - Ask user to paste folder URL or token.
-   - Extract token from `/drive/folder/<token>` when a URL is provided.
-   - Use `--target-root <token>`.
+1. Existing Feishu/Lark folder: ask for folder URL or token, extract `/drive/folder/<token>`, and use `--target-root <token>`.
+2. New migration folder under My Space root: ask for root folder name and use `--root-name <name>` without `--target-root`.
+3. New migration folder under an existing folder: ask for parent folder URL/token and root folder name, then use `--target-root <token> --root-name <name>`.
 
-2. New migration folder under Feishu My Space root:
-   - Ask for migration root folder name.
-   - Do not pass `--target-root`.
-   - Use `--root-name <name>`.
-
-3. New migration folder under a specific existing Feishu folder:
-   - Ask for parent folder URL/token.
-   - Ask for migration root folder name.
-   - Use `--target-root <token> --root-name <name>`.
-
-Before writing to Feishu, summarize destination clearly and ask for confirmation.
+Before writing, summarize destination clearly and ask for confirmation.
 
 ## Dry Run First
 
-Always run dry run（预演/只生成迁移计划，不写飞书）before real migration unless the user explicitly says they already reviewed the current dry-run result.
+Always run dry run（预演）before real migration unless the user explicitly confirms they already reviewed the current dry-run result.
 
-Dry-run command:
+Typical command:
 
 ```bash
 npm run migrate -- --dry-run --file-list <selected_file_list.json> --root-name "石墨迁移"
@@ -117,62 +113,44 @@ npm run migrate -- --dry-run --file-list <selected_file_list.json> --root-name "
 
 After dry run, summarize:
 
-- Total files.
+- Total selected files.
 - Included/excluded scope.
-- File paths or folder paths matched.
+- Matched file/folder paths.
 - Unsupported/fallback candidate count.
-- Feishu destination plan.
-- Whether any action will write to Feishu.
+- Feishu/Lark destination plan.
+- Whether any action wrote to Feishu/Lark. It must be no.
 
 ## Failure Recovery Workflow
 
 ### Auto resume（自动断点续跑）
 
-If `migration_state.json` exists and clearly belongs to the same output directory/task, auto-run with `--resume`. Ask the user only when:
-
-- Destination changed.
-- Scope changed.
-- State file is corrupted or incomplete.
-- It is unclear whether the saved state belongs to the current task.
-- Resume fails.
+If `migration_state.json` exists and clearly belongs to the same output directory/task, auto-run with `--resume`. Ask the user only when destination changed, scope changed, state is corrupted, state ownership is unclear, or resume fails.
 
 ### Automatic second API attempt（自动第二次尝试）
 
-For supported file types, if a single file fails the first API migration attempt, the tool automatically tries one more time.
+For supported file types, if one file fails the first API migration attempt, the tool automatically tries one more time.
 
-If the second attempt fails:
-
-- Mark it as `fallback_candidate` or failed decision candidate.
-- Record Shimo link, path, type, attempts, observable export metadata, and failure classification.
-- Continue the migration.
-- Do not immediately execute fallback.
+If the second attempt fails, mark it as a decision candidate, record Shimo link/path/type/attempts/failure classification, continue the migration, and do not immediately execute fallback.
 
 ### Unsupported API types（明确不支持 API 的类型）
 
-If a file type is known to be unsupported, such as `table`, do not waste time on two API attempts.
+For known unsupported types such as `table`, skip API export, record as `fallback_candidate`, report at the end, and wait for the user's decision.
 
-- Skip API export.
-- Record it as `fallback_candidate`.
-- Report it at the end.
-- Wait for the user's decision.
+### Flexible user decisions
 
-### Flexible user decisions after report
+At the end, offer:
 
-At the end, give the user flexible options. The user may choose different actions for different files:
-
-- Retry all failed files.
-- Retry only selected files.
-- Fallback all recommended fallback candidates.
-- Fallback only selected files.
+- Retry all or selected failed files.
+- Fallback all or selected fallback candidates.
 - Skip/abandon selected files.
-- Leave the rest unresolved.
+- Leave unresolved files for later.
 
 Use generated files:
 
 - `retry_candidates.json`
 - `fallback_candidates.json`
 
-The user or agent can edit/copy subsets and then run:
+Subset commands:
 
 ```bash
 npm run migrate -- --retry-candidate-list outputs/migration/retry_subset.json --output-dir outputs/migration
@@ -183,24 +161,35 @@ npm run migrate -- --fallback-mode execute --fallback-candidate-list outputs/mig
 
 Fallback（兜底迁移）is not executed automatically by default. Default mode is `collect`.
 
-Fallback mode:
-
 - `off`: do not collect/execute fallback candidates.
-- `collect`: collect candidates and report them for user decision. Default.
+- `collect`: collect candidates and report them for user decision.
 - `execute`: execute fallback only for user-approved candidate lists.
 
-Fallback by type:
+Fallback preserves readability and traceability, not original editability:
 
 - `newdoc` / `modoc`: Feishu docx + PDF reference + original Shimo link.
 - `mindmap`: Feishu docx + screenshot reference + original Shimo link.
 - `sheet` / `mosheet`: Feishu docx + screenshot reference + original Shimo link.
 - Unsupported/unrecoverable types: Feishu docx + screenshot/reference + original Shimo link.
 
-Explain clearly that fallback preserves visibility/reference, not original editability.
+## Commands
+
+```bash
+npm run setup
+npm run doctor
+npm run login
+npm run migrate -- --dry-run
+npm run scope -- --file-list outputs/migration/shimo_file_list.json --include "企业空间/项目资料" --output outputs/migration/selected_file_list.json --explain
+npm run migrate -- --file-list outputs/migration/selected_file_list.json --dry-run
+npm run migrate -- --file-list outputs/migration/selected_file_list.json --root-name "石墨迁移"
+npm run migrate -- --resume
+npm run migrate -- --retry-candidate-list outputs/migration/retry_subset.json
+npm run migrate -- --fallback-mode execute --fallback-candidate-list outputs/migration/fallback_subset.json
+```
 
 ## Configuration
 
-Use `migration.config.json`:
+Use local `migration.config.json`, copied from `migration.config.example.json`. Never commit it.
 
 ```json
 {
@@ -225,57 +214,29 @@ Use `migration.config.json`:
 }
 ```
 
-## Commands
+## Implemented v1.0.1 Features
 
-```bash
-npm install
-npm run login
-npm run migrate -- --dry-run
-npm run scope -- --file-list outputs/migration/shimo_file_list.json --include "企业空间/项目资料" --output outputs/migration/selected_file_list.json --explain
-npm run migrate -- --file-list outputs/migration/selected_file_list.json --dry-run
-npm run migrate -- --file-list outputs/migration/selected_file_list.json --root-name "石墨迁移"
-npm run migrate -- --resume
-npm run migrate -- --retry-candidate-list outputs/migration/retry_subset.json
-npm run migrate -- --fallback-mode execute --fallback-candidate-list outputs/migration/fallback_subset.json
-```
-
-## Implemented v1.0 Features
-
+- Agent-installable repository structure with `SKILL.md`, `AGENTS.md`, `INSTALL.md`, scripts, and references.
 - Agent-guided migration workflow.
 - Full-account scan.
 - Natural-language scope support through deterministic include/exclude resolver.
-- Feishu folder tree creation and path preservation.
+- Feishu/Lark folder tree creation and path preservation.
 - User-selected destination via `--target-root` / `feishu.target_root_token`.
 - OAuth user authorization.
-- API export and Feishu upload/import.
+- API export and Feishu/Lark upload/import.
 - Auto resume when state is compatible.
 - Automatic second API attempt per failed supported file.
 - Unsupported API types collected as fallback candidates.
 - Failure classifier and observable export metadata.
 - User-approved fallback execution.
 - Local and remote verification.
-- Redacted reports plus retry/fallback candidate lists. Reports redact Feishu tokens, Feishu document/file URLs, fallback artifact tokens, and verification metadata by default; candidate lists intentionally keep Shimo GUIDs/links for local subset decisions and must not be published.
+- Redacted reports plus retry/fallback candidate lists.
 
-## Not Implemented in v1.0
+## Not Implemented in v1.0.1
 
 - Batch concurrency and adaptive global rate-limit scheduling.
-- Full interactive CLI setup wizard. Agent-guided flow in this SKILL.md is the primary interface.
-
-## Bilingual / Translation Requirements for GitHub
-
-Keep these in both Chinese and English before public release:
-
-- README quick start and safety notice.
-- Non-official API disclaimer.
-- Feishu OAuth setup guide.
-- Shimo login guide.
-- Agent workflow guide.
-- Failure recovery / retry / fallback guide.
-- Configuration reference.
-- Troubleshooting FAQ.
-- Report field explanations.
-
-For Chinese docs and Chinese conversations, never use dry run/resume/retry/fallback/OAuth/token without a Chinese explanation on first mention.
+- Full interactive CLI setup wizard. Agent-guided flow is the primary interface.
+- Fully verified Windows/Linux end-to-end migration. Read `references/platform_compatibility.md`.
 
 ## Output
 
