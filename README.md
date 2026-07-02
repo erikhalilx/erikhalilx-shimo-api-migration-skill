@@ -35,8 +35,6 @@ CLI 保留为稳定执行内核，不是唯一产品入口。
 - Local and remote verification after upload.
 - Redacted migration reports plus retry/fallback candidate JSON lists.
 
-Not implemented in v1.0: batch concurrency and adaptive global rate-limit scheduling. Migration is intentionally serial for safer folder/document creation.
-
 ## Supported Types
 
 | Shimo type | API export | Feishu result |
