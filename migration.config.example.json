@@ -1,8 +1,10 @@
 {
   "feishu": {
-    "app_id": "cli_xxx",
-    "app_secret": "your_app_secret",
-    "target_root_token": ""
+    "backend": "lark-cli",
+    "lark_cli_path": "lark-cli",
+    "target_root_token": "",
+    "app_id": "",
+    "app_secret": ""
   },
   "root_name": "石墨迁移",
   "output_dir": "outputs/migration",

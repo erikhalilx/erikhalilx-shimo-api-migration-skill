@@ -15,7 +15,7 @@ When a user provides this GitHub repository URL and asks to install the Skill:
 3. Clone or download the full repository.
 4. Run `npm run setup`.
 5. Run `npm run doctor`.
-6. Ask the user to configure Feishu app credentials locally.
+6. Use the official `lark-cli` user authorization backend by default: run `npx lark-cli auth login --domain drive,docs`, then verify with `npx lark-cli auth status --verify --json`. Never extract or print token values.
 7. Run `npm run login` only when the user is ready to complete Shimo login in the browser.
 
 ## Safety rules

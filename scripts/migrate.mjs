@@ -15,12 +15,12 @@ import path from 'path';
 import { interactiveLogin, isSessionValid, getShimoSessionDir, configureLogin } from './login.mjs';
 import { scanShimoFiles, filterByTypes } from './scan.mjs';
 import { buildFolderTree, loadFolderMap, getTargetFolderToken, getFeishuPath } from './folder_tree.mjs';
-import { exportFile, getExportFormat, FEISHU_IMPORT_MAP, normalizeType, UNSUPPORTED_TYPES } from './exporter.mjs';
+import { exportFile, getExportFormat, FEISHU_IMPORT_MAP, normalizeType } from './exporter.mjs';
 import { initFeishu, uploadFile } from './feishu_upload.mjs';
 import { verifyTask } from './verifier.mjs';
 import { StateManager } from './state.mjs';
 import { generateReport } from './report.mjs';
-import { classifyFailure } from './failure_classifier.mjs';
+import { assessUnmigratable, classifyFailure } from './failure_classifier.mjs';
 import { runFallbackMigration } from './fallback_migrate.mjs';
 
 const DEFAULT_OUTPUT_DIR = 'outputs/migration';
@@ -28,20 +28,30 @@ const DEFAULT_CACHE_DIR = '.cache/shimo-api-migration';
 const EXPORT_DIR_NAME = 'exports';
 const FALLBACK_DIR_NAME = 'fallback_artifacts';
 const MAX_API_ATTEMPTS = 2;
+const NETWORK_FAILURE_CIRCUIT_THRESHOLD = 5;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function isCircuitBreakerFailure(classification) {
+  return classification?.category === 'api_network_or_context_failed';
+}
 
 function parseArgs() {
   const args = process.argv.slice(2);
   const config = {
     root_name: `石墨迁移_API_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`,
     target_root_token: '',
+    targetRootExplicit: false,
+    forceMySpaceRoot: false,
     types: [],
     fileList: '',
     outputDir: DEFAULT_OUTPUT_DIR,
     cacheDir: DEFAULT_CACHE_DIR,
     feishuAppId: '',
     feishuAppSecret: '',
+    feishuBackend: 'lark-cli',
+    feishuBackendExplicit: false,
+    larkCliPath: process.env.LARK_CLI_PATH || 'lark-cli',
     dryRun: false,
     resume: false,
     retryFailed: false,
@@ -61,13 +71,16 @@ function parseArgs() {
     switch (arg) {
       case '--root-name': config.root_name = next; i++; break;
       case '--target-root':
-      case '--target-root-token': config.target_root_token = next; i++; break;
+      case '--target-root-token': config.target_root_token = next; config.targetRootExplicit = true; i++; break;
+      case '--my-space-root': config.target_root_token = ''; config.forceMySpaceRoot = true; config.targetRootExplicit = true; break;
       case '--types': config.types = next.split(',').map(s => s.trim()).filter(Boolean); i++; break;
       case '--file-list': config.fileList = next; i++; break;
       case '--output-dir': config.outputDir = next; i++; break;
       case '--cache-dir': config.cacheDir = next; i++; break;
       case '--feishu-app-id': config.feishuAppId = next; i++; break;
       case '--feishu-app-secret': config.feishuAppSecret = next; i++; break;
+      case '--feishu-backend': config.feishuBackend = next; config.feishuBackendExplicit = true; i++; break;
+      case '--lark-cli-path': config.larkCliPath = next; i++; break;
       case '--dry-run': config.dryRun = true; break;
       case '--resume': config.resume = true; break;
       case '--retry-failed': config.retryFailed = true; break;
@@ -87,6 +100,9 @@ function parseArgs() {
   if (!['off', 'collect', 'execute'].includes(config.fallbackMode)) {
     throw new Error('--fallback-mode must be one of: off, collect, execute');
   }
+  if (!['lark-cli', 'oauth'].includes(config.feishuBackend)) {
+    throw new Error('--feishu-backend must be one of: lark-cli, oauth');
+  }
   return config;
 }
 
@@ -96,13 +112,16 @@ Usage: shimo-migrate [options]
 
 Options:
   --root-name <name>                 Migration root folder name in Feishu
-  --target-root <token>              Existing Feishu parent folder token; if omitted, create under My Space root
+  --target-root <token>              Existing Feishu parent folder token
+  --my-space-root                    Explicitly create under My Space root; overrides configured target_root_token
   --file-list <path>                 Use selected Shimo file list JSON
   --types <type1,type2>              Advanced/debug only: filter by Shimo types
   --output-dir <path>                Output directory (default: outputs/migration)
   --cache-dir <path>                 Cache directory for Shimo/Feishu sessions (default: .cache/shimo-api-migration)
-  --feishu-app-id <id>               Feishu app ID
-  --feishu-app-secret <secret>       Feishu app secret
+  --feishu-backend <lark-cli|oauth>  Feishu write backend (default: lark-cli)
+  --lark-cli-path <path>             Path to official lark-cli executable
+  --feishu-app-id <id>               Feishu app ID (oauth backend only)
+  --feishu-app-secret <secret>       Feishu app secret (oauth backend only)
   --dry-run                          Plan only, no writes to Feishu
   --resume                           Resume from saved state
   --retry-failed                     Retry all failed tasks from state
@@ -131,7 +150,9 @@ function loadConfig(config) {
     const fileConfig = JSON.parse(fs.readFileSync(p, 'utf-8'));
     if (!config.feishuAppId && fileConfig.feishu?.app_id) config.feishuAppId = fileConfig.feishu.app_id;
     if (!config.feishuAppSecret && fileConfig.feishu?.app_secret) config.feishuAppSecret = fileConfig.feishu.app_secret;
-    if (!config.target_root_token && fileConfig.feishu?.target_root_token) config.target_root_token = fileConfig.feishu.target_root_token;
+    if (!config.feishuBackendExplicit && fileConfig.feishu?.backend) config.feishuBackend = fileConfig.feishu.backend;
+    if (config.larkCliPath === (process.env.LARK_CLI_PATH || 'lark-cli') && fileConfig.feishu?.lark_cli_path) config.larkCliPath = fileConfig.feishu.lark_cli_path;
+    if (!config.targetRootExplicit && !config.forceMySpaceRoot && !config.target_root_token && fileConfig.feishu?.target_root_token) config.target_root_token = fileConfig.feishu.target_root_token;
     if (!config.fileList && fileConfig.file_list) config.fileList = fileConfig.file_list;
     if (config.outputDir === DEFAULT_OUTPUT_DIR && fileConfig.output_dir) config.outputDir = fileConfig.output_dir;
     if (config.cacheDir === DEFAULT_CACHE_DIR && fileConfig.cache_dir) config.cacheDir = fileConfig.cache_dir;
@@ -174,6 +195,7 @@ function recordFallbackCandidate(stateManager, { task, taskId, currentAttempt, c
     shimo_url: task.shimo_url,
     shimo_path: shimoPath(task),
     feishu_path: feishuPath,
+    unmigratable: { category: classification?.category || '', reason: classification?.reason || errorMessage || '', evidence: observableExport || null },
     export_method: 'api',
     error: { message: errorMessage || classification?.reason || 'fallback candidate' },
     failure_classification: classification,
@@ -197,13 +219,18 @@ async function main() {
   console.log('══════════════════════════════════════════════════════\n');
   console.log('Safety: Shimo source files are read-only. Existing Feishu files are never deleted or modified.\n');
 
-  if (!config.dryRun && (!config.feishuAppId || !config.feishuAppSecret)) {
-    console.error('❌ Missing Feishu credentials. Provide them in migration.config.json or CLI options.');
+  if (!config.dryRun && config.feishuBackend === 'oauth' && (!config.feishuAppId || !config.feishuAppSecret)) {
+    console.error('❌ Missing Feishu credentials for oauth backend. Provide them in migration.config.json or CLI options.');
     process.exit(1);
   }
 
-  if (config.feishuAppId && config.feishuAppSecret) {
-    initFeishu({ feishu: { app_id: config.feishuAppId, app_secret: config.feishuAppSecret }, cacheDir: config.cacheDir });
+  if (!config.dryRun) {
+    initFeishu({
+      backend: config.feishuBackend,
+      larkCliPath: config.larkCliPath,
+      feishu: { app_id: config.feishuAppId, app_secret: config.feishuAppSecret },
+      cacheDir: config.cacheDir,
+    });
   }
   fs.mkdirSync(config.outputDir, { recursive: true });
   const exportDir = path.join(config.outputDir, EXPORT_DIR_NAME);
@@ -255,6 +282,7 @@ async function main() {
     console.log('\n══════════════════════════════════════════════════════');
     console.log('  Dry Run — Migration Plan');
     console.log('══════════════════════════════════════════════════════\n');
+    console.log(`Feishu backend: ${config.feishuBackend}`);
     console.log(`Feishu parent folder token: ${config.target_root_token || '(My Space root)'}`);
     console.log(`Migration root folder name: ${config.root_name}`);
     console.log(`Fallback mode: ${config.fallbackMode}`);
@@ -283,7 +311,7 @@ async function main() {
     space_name: f.space_name,
     parent_guid: f.parent_guid,
     folder_path: f.folder_path || '',
-    shimo_url: f.shimo_url || `https://shimo.im/docs/${f.guid}`,
+    shimo_url: f.shimo_url || (f.url ? new URL(f.url, 'https://shimo.im').href : `https://shimo.im/docs/${f.guid}`),
     size: f.size || 0,
   }));
 
@@ -306,7 +334,7 @@ async function main() {
   }
 
   const completedGuids = stateManager.getCompletedGuids();
-  const pendingTasks = fallbackCandidateSet ? taskQueue : taskQueue.filter(t => !completedGuids.has(t.guid));
+  const pendingTasks = (fallbackCandidateSet || retryCandidateSet || config.retryFailed) ? taskQueue : taskQueue.filter(t => !completedGuids.has(t.guid));
   console.log(`   Pending: ${pendingTasks.length} (completed ${taskQueue.length - pendingTasks.length})`);
 
   console.log('\n5. Executing migration tasks...\n');
@@ -324,14 +352,23 @@ async function main() {
   let successCount = 0;
   let failCount = 0;
   let candidateCount = 0;
+  let consecutiveNetworkFailures = 0;
+  let circuitBreakerTriggered = false;
 
   try {
     for (const task of pendingTasks) {
+      if (circuitBreakerTriggered) {
+        console.log(`   ⏸️ Network circuit breaker active; stopping before ${task.name}.`);
+        break;
+      }
       processed++;
       const startedAt = new Date().toISOString();
       const taskId = getTaskId(task);
       const previous = stateManager.getTaskByGuid(task.guid);
-      const previousAttempts = fallbackCandidateSet ? (previous?.attempts || MAX_API_ATTEMPTS) : (previous?.attempts || 0);
+      const isRetryMode = !fallbackCandidateSet && (retryCandidateSet || config.retryFailed);
+      const previousAttempts = fallbackCandidateSet
+        ? (previous?.attempts || MAX_API_ATTEMPTS)
+        : (isRetryMode ? 0 : (previous?.attempts || 0));
       const currentAttempt = fallbackCandidateSet ? previousAttempts : previousAttempts + 1;
       const folderToken = getTargetFolderToken(task, folderMap);
       const feishuPath = getFeishuPath(task, folderMap);
@@ -343,16 +380,53 @@ async function main() {
         console.log('   Executing user-approved fallback...');
         const classification = previous?.failure_classification || classifyFailure({ error: `fallback approved for ${task.type}` });
         const fallbackResult = await runFallbackMigration({ task, page, context, folderToken, outputDir: fallbackDir, classification, failureReason: classification.reason });
-        stateManager.recordTask({ task_id: taskId, status: 'success', attempts: currentAttempt, type: task.type, name: task.name, shimo_guid: task.guid, shimo_url: task.shimo_url, shimo_path: shimoPath(task), feishu_path: feishuPath, feishu_token: fallbackResult.token, feishu_url: fallbackResult.url, export_method: 'fallback', upload_method: fallbackResult.method, fallback: fallbackResult, failure_classification: classification, started_at: startedAt, finished_at: new Date().toISOString() });
+        stateManager.recordTask({
+          task_id: taskId,
+          status: fallbackResult.success ? 'success' : 'failed',
+          attempts: currentAttempt,
+          type: task.type,
+          name: task.name,
+          shimo_guid: task.guid,
+          shimo_url: task.shimo_url,
+          shimo_path: shimoPath(task),
+          feishu_path: feishuPath,
+          feishu_token: fallbackResult.token,
+          feishu_url: fallbackResult.url,
+          export_method: 'fallback',
+          upload_method: fallbackResult.method,
+          fallback: fallbackResult,
+          error: fallbackResult.success ? null : { message: fallbackResult.error },
+          failure_classification: fallbackResult.success ? classification : classifyFailure({ error: fallbackResult.error }),
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+        });
         await stateManager.save();
-        successCount++;
+        if (fallbackResult.success) successCount++;
+        else failCount++;
         continue;
       }
 
       if (!supported) {
         const classification = classifyFailure({ error: `unsupported type: ${task.type}` });
-        console.log(`   ⏭️ Unsupported by API; collecting fallback candidate: ${classification.category}`);
-        recordFallbackCandidate(stateManager, { task, taskId, currentAttempt: 0, classification, errorMessage: `unsupported type: ${task.type}`, feishuPath, startedAt, status: 'fallback_candidate' });
+        console.log(`   ⏭️ Unsupported by API; marking as unmigratable and continuing: ${classification.category}`);
+        stateManager.recordTask({
+          task_id: taskId,
+          status: 'skipped_unmigratable',
+          attempts: 0,
+          type: task.type,
+          name: task.name,
+          shimo_guid: task.guid,
+          shimo_url: task.shimo_url,
+          shimo_path: shimoPath(task),
+          feishu_path: feishuPath,
+          export_method: 'api_unavailable',
+          error: { message: `unsupported type: ${task.type}` },
+          failure_classification: classification,
+          unmigratable: { category: classification.category, reason: classification.reason, evidence: { known_unsupported_type: true } },
+          action_required: { category: 'fallback_available', options: ['fallback', 'skip'], note: 'API migration is unavailable; fallback can be executed after normal tasks finish.' },
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+        });
         await stateManager.save();
         candidateCount++;
         continue;
@@ -375,11 +449,50 @@ async function main() {
       }
 
       if (!finalExportResult?.success) {
-        console.log(`   ❌ API failed twice; collecting decision candidate: ${finalClassification?.category || 'unknown_failure'}`);
-        recordFallbackCandidate(stateManager, { task, taskId, currentAttempt: MAX_API_ATTEMPTS, classification: finalClassification, errorMessage: finalError, observableExport: finalExportResult?.observable_export, feishuPath, startedAt, status: 'fallback_candidate' });
+        const latest = stateManager.getTaskByGuid(task.guid);
+        const assessment = assessUnmigratable({
+          fileType: task.fileType || task.type,
+          attemptHistory: latest?.attempt_history || [],
+          classification: finalClassification,
+        });
+        if (assessment.unmigratable) {
+          const terminalClassification = { ...finalClassification, category: assessment.category, retryable: false, reason: assessment.reason, fallback_recommended: true };
+          console.log(`   ⏭️ API migration proven unavailable; marking terminal and continuing: ${assessment.category}`);
+          stateManager.recordTask({
+            task_id: taskId,
+            status: 'skipped_unmigratable',
+            attempts: MAX_API_ATTEMPTS,
+            type: task.type,
+            name: task.name,
+            shimo_guid: task.guid,
+            shimo_url: task.shimo_url,
+            shimo_path: shimoPath(task),
+            feishu_path: feishuPath,
+            export_method: 'api_unmigratable',
+            error: { message: finalError || assessment.reason },
+            failure_classification: terminalClassification,
+            observable_export: finalExportResult?.observable_export,
+            unmigratable: assessment,
+            action_required: { category: 'fallback_available', options: ['fallback', 'skip'], note: 'Normal API migration is complete; fallback can run after all normal tasks finish.' },
+            started_at: startedAt,
+            finished_at: new Date().toISOString(),
+          });
+        } else {
+          console.log(`   ❌ API failed twice without permanent evidence; keeping retryable: ${finalClassification?.category || 'unknown_failure'}`);
+          recordFallbackCandidate(stateManager, { task, taskId, currentAttempt: MAX_API_ATTEMPTS, classification: finalClassification, errorMessage: finalError, observableExport: finalExportResult?.observable_export, feishuPath, startedAt, status: 'fallback_candidate' });
+        }
         await stateManager.save();
         candidateCount++;
         failCount++;
+        if (isCircuitBreakerFailure(finalClassification)) {
+          consecutiveNetworkFailures++;
+          if (consecutiveNetworkFailures >= NETWORK_FAILURE_CIRCUIT_THRESHOLD) {
+            circuitBreakerTriggered = true;
+            console.log(`   🛑 Network circuit breaker triggered after ${consecutiveNetworkFailures} consecutive network/context failures.`);
+          }
+        } else {
+          consecutiveNetworkFailures = 0;
+        }
         continue;
       }
 
@@ -411,19 +524,65 @@ async function main() {
       stateManager.recordTask({ task_id: taskId, status: 'success', attempts: currentAttempt, type: task.type, name: task.name, shimo_guid: task.guid, shimo_url: task.shimo_url, shimo_path: shimoPath(task), feishu_path: feishuPath, feishu_token: uploadResult.token, feishu_url: uploadResult.url, export_method: 'api', upload_method: uploadResult.method, file_size: exportResult.fileSize, verification, observable_export: exportResult.observable_export, started_at: startedAt, finished_at: new Date().toISOString() });
       await stateManager.save();
       successCount++;
+      consecutiveNetworkFailures = 0;
       console.log(`   ✅ Uploaded [${uploadResult.method}]: ${uploadResult.url}`);
       await sleep(2000);
+    }
+
+    if (!fallbackCandidateSet && config.fallbackMode === 'execute' && !circuitBreakerTriggered) {
+      const unmigratable = stateManager.getUnmigratableTasks();
+      if (unmigratable.length > 0) {
+        console.log(`\n6. Normal migration phase complete. Executing fallback for ${unmigratable.length} unmigratable files...\n`);
+      }
+      let fallbackIndex = 0;
+      for (const stateTask of unmigratable) {
+        fallbackIndex++;
+        const task = taskQueue.find(item => item.guid === stateTask.shimo_guid || getTaskId(item) === stateTask.task_id);
+        if (!task) {
+          console.log(`   ❌ Fallback task missing from current file list: ${stateTask.name}`);
+          continue;
+        }
+        const folderToken = getTargetFolderToken(task, folderMap);
+        const feishuPath = getFeishuPath(task, folderMap);
+        const classification = stateTask.failure_classification || classifyFailure({ error: stateTask.error?.message || 'unmigratable by API' });
+        console.log(`   [${fallbackIndex}/${unmigratable.length}] Fallback: ${task.name} (${task.fileType || task.type})`);
+        const fallbackResult = await runFallbackMigration({ task, page, context, folderToken, outputDir: fallbackDir, classification, failureReason: classification.reason });
+        stateManager.recordTask({
+          task_id: getTaskId(task),
+          status: fallbackResult.success ? 'success' : 'failed',
+          attempts: stateTask.attempts,
+          type: task.type,
+          name: task.name,
+          shimo_guid: task.guid,
+          shimo_url: task.shimo_url,
+          shimo_path: shimoPath(task),
+          feishu_path: feishuPath,
+          feishu_token: fallbackResult.token,
+          feishu_url: fallbackResult.url,
+          export_method: 'fallback',
+          upload_method: fallbackResult.method,
+          fallback: fallbackResult,
+          error: fallbackResult.success ? null : { message: fallbackResult.error },
+          failure_classification: fallbackResult.success ? classification : classifyFailure({ error: fallbackResult.error }),
+          unmigratable: stateTask.unmigratable,
+          started_at: stateTask.started_at,
+          finished_at: new Date().toISOString(),
+        });
+        await stateManager.save();
+        if (fallbackResult.success) successCount++;
+        else failCount++;
+      }
     }
   } finally {
     await context.close().catch(() => {});
   }
 
-  console.log('\n6. Generating report...');
+  console.log('\n7. Generating report...');
   await generateReport(config.outputDir);
   console.log('\n══════════════════════════════════════════════════════');
-  console.log('  Migration complete');
-  console.log(`  This run: ${processed} processed, ${successCount} success, ${failCount} failed, ${candidateCount} need decision`);
-  console.log(`  Total: ${stateManager.summary.total}, success ${stateManager.summary.success}, failed ${stateManager.summary.failed}, fallback candidates ${stateManager.summary.fallback_candidate || 0}, fallback ${stateManager.summary.fallback_success || 0}`);
+  console.log(stateManager.summary.complete ? '  Migration fully complete' : '  Migration run complete');
+  console.log(`  This run: ${processed} normal tasks processed, ${successCount} success, ${failCount} failed, ${candidateCount} skipped/candidates`);
+  console.log(`  Total: ${stateManager.summary.total}, normal success ${stateManager.summary.success - stateManager.summary.fallback_success}, fallback success ${stateManager.summary.fallback_success || 0}, unmigratable by normal API ${stateManager.summary.unmigratable_total || stateManager.summary.skipped_unmigratable || 0}, failed ${stateManager.summary.failed}, retry candidates ${stateManager.summary.fallback_candidate || 0}`);
   console.log(`  Report: ${path.join(config.outputDir, 'migration_report.md')}`);
   console.log('══════════════════════════════════════════════════════\n');
 }

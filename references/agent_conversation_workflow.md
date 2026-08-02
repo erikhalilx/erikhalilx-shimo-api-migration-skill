@@ -23,15 +23,18 @@ After installing the repository as a Skill, say what was installed:
 
 Then run or ask to run `npm run doctor` and explain the result.
 
-## Credential conversation
+## Feishu/Lark authorization conversation
 
-Ask the user to configure Feishu credentials locally:
+Use the official `lark-cli` user authorization backend by default:
 
-- app_id
-- app_secret
-- optional target_root_token
+```bash
+npx lark-cli auth login --domain drive,docs
+npx lark-cli auth status --verify --json
+```
 
-Never ask the user to paste secrets into a public place. If secrets are shown in the local conversation, do not repeat them back.
+If the agent cannot wait for a blocking command, initiate device authorization with `--no-wait --json`, show the returned verification URL or QR code to the user, and finish with `--device-code` after the user confirms authorization.
+
+Do not ask for `app_id` or `app_secret` when using the default backend. Never extract or repeat access tokens. Ask for app credentials only when the user explicitly chooses the legacy `--feishu-backend oauth` compatibility mode. An optional destination folder token may still be supplied as part of destination selection.
 
 ## Shimo login conversation
 

@@ -49,7 +49,7 @@ agent 应完成：
 4. 安装 Node 依赖。
 5. 安装 Playwright Chromium。
 6. 复制或生成本地配置文件。
-7. 引导用户填写飞书 app_id / app_secret。
+7. 默认引导用户通过官方 `lark-cli` 完成飞书用户设备授权并检查状态；不要求迁移器读取或保存明文令牌。仅当用户显式选择旧 OAuth 兼容后端时，才配置本地 app_id / app_secret。
 8. 引导用户完成石墨登录。
 9. 引导用户说明迁移范围。
 10. 先执行预演。
@@ -193,7 +193,7 @@ scripts/doctor.mjs
 - Node 版本。
 - Playwright 可用性。
 - `migration.config.json` 是否存在。
-- 飞书 app_id/app_secret 是否填写，注意只检查存在，不打印值。
+- 官方 `lark-cli` 是否可执行、当前飞书用户授权是否有效；不打印令牌。仅当配置为旧 OAuth 兼容后端时，才检查 app_id/app_secret 是否存在且不打印值。
 - `.cache` 是否存在石墨登录态。
 - 输出目录是否可写。
 - 当前平台：macOS / Windows / Linux。

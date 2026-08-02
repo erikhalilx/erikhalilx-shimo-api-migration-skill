@@ -3,8 +3,9 @@ import { existsSync, accessSync, constants, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const root = process.cwd();
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const checks = [];
 let hasFailure = false;
 let hasWarning = false;
@@ -33,8 +34,11 @@ function checkNpm() {
     cwd: root,
     encoding: 'utf8',
     shell: process.platform === 'win32',
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
   });
   if (result.status === 0) add('OK', 'npm', String(result.stdout).trim());
+  else if (result.error?.code === 'ETIMEDOUT') add('FAIL', 'npm', 'npm version check timed out after 15 seconds');
   else add('FAIL', 'npm', 'npm not found');
 }
 
@@ -44,12 +48,15 @@ function checkPackageInstall() {
 }
 
 function checkPlaywright() {
-  const result = spawnSync('npx', ['playwright', '--version'], {
+  const result = spawnSync('npx', ['--no-install', 'playwright', '--version'], {
     cwd: root,
     encoding: 'utf8',
     shell: process.platform === 'win32',
+    timeout: 20000,
+    maxBuffer: 1024 * 1024,
   });
   if (result.status === 0) add('OK', 'Playwright', String(result.stdout).trim());
+  else if (result.error?.code === 'ETIMEDOUT') add('WARN', 'Playwright', 'Version check timed out after 20 seconds. Run npm run setup.');
   else add('WARN', 'Playwright', 'Playwright not ready. Run npm run setup.');
 }
 
@@ -69,14 +76,82 @@ function readConfig() {
   }
 }
 
-function checkFeishuConfig(config) {
-  if (!config) return;
+function getLarkCliCommand(config) {
+  const configured = config?.feishu?.lark_cli_path;
+  if (configured && configured !== 'lark-cli') return configured;
+  const localName = process.platform === 'win32' ? 'lark-cli.cmd' : 'lark-cli';
+  const localPath = path.join(root, 'node_modules', '.bin', localName);
+  return existsSync(localPath) ? localPath : (configured || 'lark-cli');
+}
+
+function checkFeishuBackend(config) {
+  const backend = config?.feishu?.backend || 'lark-cli';
+  if (backend === 'lark-cli') {
+    add('OK', 'Feishu/Lark backend', 'official lark-cli user authorization');
+    return;
+  }
+  if (backend === 'oauth') {
+    add('WARN', 'Feishu/Lark backend', 'legacy built-in OAuth backend');
+    return;
+  }
+  add('FAIL', 'Feishu/Lark backend', `Unsupported backend: ${backend}`);
+}
+
+function checkLarkCli(config) {
+  const backend = config?.feishu?.backend || 'lark-cli';
+  if (backend !== 'lark-cli') return;
+  const command = getLarkCliCommand(config);
+  const version = spawnSync(command, ['--version'], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    timeout: 20000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (version.status !== 0) {
+    const detail = version.error?.code === 'ETIMEDOUT'
+      ? 'Version check timed out after 20 seconds.'
+      : 'Not found. Run npm install, then use npx lark-cli or set feishu.lark_cli_path.';
+    add('FAIL', 'lark-cli', detail);
+    return;
+  }
+  add('OK', 'lark-cli', String(version.stdout).trim());
+  const status = spawnSync(command, ['auth', 'status', '--verify', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    timeout: 30000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  if (status.status !== 0) {
+    const detail = status.error?.code === 'ETIMEDOUT'
+      ? 'Authorization verification timed out after 30 seconds. Re-run it when system resources are available.'
+      : 'Not ready. Run npx lark-cli auth login --domain drive,docs.';
+    add('WARN', 'Feishu/Lark user authorization', detail);
+    return;
+  }
+  try {
+    const parsed = JSON.parse(String(status.stdout).trim());
+    const tokenStatus = parsed?.data?.user?.tokenStatus || parsed?.data?.tokenStatus || '';
+    const userStatus = parsed?.data?.user?.status || parsed?.data?.status || '';
+    if (tokenStatus === 'valid' || userStatus === 'ready' || parsed?.ok === true) {
+      add('OK', 'Feishu/Lark user authorization', 'Ready and verified; token values are not printed');
+    } else {
+      add('WARN', 'Feishu/Lark user authorization', 'Status returned but is not ready. Re-run lark-cli auth login.');
+    }
+  } catch {
+    add('WARN', 'Feishu/Lark user authorization', 'Could not parse lark-cli status output. Run lark-cli auth status --verify --json manually.');
+  }
+}
+
+function checkLegacyOAuthConfig(config) {
+  if (!config || config.feishu?.backend !== 'oauth') return;
   const appId = config.feishu?.app_id;
   const appSecret = config.feishu?.app_secret;
   if (appId && appId !== 'cli_xxx') add('OK', 'Feishu/Lark app_id', 'Configured');
-  else add('WARN', 'Feishu/Lark app_id', 'Not configured');
+  else add('WARN', 'Feishu/Lark app_id', 'Required for legacy OAuth backend but not configured');
   if (appSecret && appSecret !== 'your_app_secret') add('OK', 'Feishu/Lark app_secret', 'Configured but not printed');
-  else add('WARN', 'Feishu/Lark app_secret', 'Not configured');
+  else add('WARN', 'Feishu/Lark app_secret', 'Required for legacy OAuth backend but not configured');
 }
 
 function checkShimoSession(config) {
@@ -112,7 +187,8 @@ function printReport() {
   console.log('\nNext steps:');
   console.log('- Fix any FAIL items before migration.');
   console.log('- WARN items may require user action before real migration.');
-  console.log('- Run npm run login after Feishu/Lark credentials are configured.');
+  console.log('- Default backend: authorize with npx lark-cli auth login --domain drive,docs.');
+  console.log('- Run npm run login for Shimo after Feishu/Lark authorization is ready.');
   console.log('- Always run dry run before real migration.');
   if (hasFailure) process.exitCode = 1;
   else if (hasWarning) process.exitCode = 0;
@@ -123,7 +199,9 @@ checkNpm();
 checkPackageInstall();
 checkPlaywright();
 const config = readConfig();
-checkFeishuConfig(config);
+checkFeishuBackend(config);
+checkLarkCli(config);
+checkLegacyOAuthConfig(config);
 checkShimoSession(config);
 checkOutputDir(config);
 checkPlatform();

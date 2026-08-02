@@ -18,7 +18,7 @@ export class StateManager {
     this.statePath = path.join(outputDir, 'migration_state.json');
     this.runId = runId || formatTimestamp();
     this.tasks = [];
-    this.summary = { total: 0, success: 0, failed: 0, skipped: 0, verification_failed: 0, fallback_candidate: 0, fallback_success: 0 };
+    this.summary = { total: 0, success: 0, failed: 0, skipped: 0, skipped_unmigratable: 0, unmigratable_total: 0, verification_failed: 0, fallback_candidate: 0, fallback_success: 0, processed: 0, normal_phase_complete: false, complete: false };
   }
 
   static load(outputDir) {
@@ -65,6 +65,7 @@ export class StateManager {
       failure_classification: task.error ? classified : task.failure_classification || null,
       observable_export: task.observable_export || null,
       fallback: task.fallback || null,
+      unmigratable: task.unmigratable || existing?.unmigratable || null,
       error: task.error ? {
         category: classified?.category || 'unknown_failure',
         message: task.error?.message || String(task.error),
@@ -86,10 +87,19 @@ export class StateManager {
     this.summary.total = this.tasks.length;
     this.summary.success = this.tasks.filter(t => t.status === 'success').length;
     this.summary.failed = this.tasks.filter(t => t.status === 'failed').length;
-    this.summary.skipped = this.tasks.filter(t => t.status === 'skipped').length;
+    this.summary.skipped = this.tasks.filter(t => t.status === 'skipped' || t.status === 'skipped_unmigratable').length;
+    this.summary.skipped_unmigratable = this.tasks.filter(t => t.status === 'skipped_unmigratable').length;
+    this.summary.unmigratable_total = this.tasks.filter(t => t.status === 'skipped_unmigratable' || t.unmigratable || (t.export_method === 'fallback' && t.failure_classification)).length;
     this.summary.verification_failed = this.tasks.filter(t => t.status === 'verification_failed').length;
     this.summary.fallback_candidate = this.tasks.filter(t => t.status === 'fallback_candidate').length;
     this.summary.fallback_success = this.tasks.filter(t => t.status === 'success' && t.export_method === 'fallback').length;
+    this.summary.processed = this.tasks.filter(t => ['success', 'skipped', 'skipped_unmigratable'].includes(t.status)).length;
+    this.summary.normal_phase_complete = this.summary.total > 0 && this.summary.processed + this.summary.fallback_candidate === this.summary.total;
+    this.summary.complete = this.summary.total > 0
+      && this.summary.processed === this.summary.total
+      && this.summary.failed === 0
+      && this.summary.verification_failed === 0
+      && this.summary.fallback_candidate === 0;
   }
 
   async save() {
@@ -107,19 +117,25 @@ export class StateManager {
   }
 
   getFailedTasks() {
-    return this.tasks.filter(t => t.status === 'failed' || t.status === 'verification_failed' || t.status === 'fallback_candidate');
+    return this.tasks.filter(t => ['failed', 'verification_failed', 'fallback_candidate'].includes(t.status));
   }
 
   getRetryableFailedTasks() {
-    return this.tasks.filter(t => t.status === 'failed' || t.status === 'verification_failed');
+    return this.tasks.filter(t => ['failed', 'verification_failed'].includes(t.status));
   }
 
   getFallbackCandidates() {
     return this.tasks.filter(t => t.status === 'fallback_candidate');
   }
 
+  getUnmigratableTasks() {
+    return this.tasks.filter(t => t.status === 'skipped_unmigratable');
+  }
+
   getCompletedGuids() {
-    return new Set(this.tasks.filter(t => t.status === 'success' || t.status === 'fallback_candidate').map(t => t.shimo_guid || t.task_id));
+    return new Set(this.tasks
+      .filter(t => ['success', 'skipped', 'skipped_unmigratable'].includes(t.status))
+      .map(t => t.shimo_guid || t.task_id));
   }
 
   getTaskByGuid(guid) {

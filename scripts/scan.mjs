@@ -5,9 +5,11 @@
  * 保留空间和嵌套文件夹路径结构。
  *
  * 数据来源优先级：
- *   1. 用户提供的 shimo_file_list.json
- *   2. 石墨内部 API (/lizard-api/files?type=used)
- *   3. 页面 DOM 提取 (降级方案)
+ *   1. 用户明确提供的 shimo_file_list.json
+ *   2. 石墨根目录入口 + 真实文件夹 GUID 子项 API
+ *   3. 页面 DOM 提取（仅在根目录 API 失败时降级）
+ *
+ * 不自动复用常见输出目录中的旧文件列表，避免把历史漏扫结果当作新扫描结果。
  */
 
 import fs from 'fs';
@@ -22,6 +24,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  * @param {Object} opts
  * @param {string} [opts.fileListPath] - 已有的文件列表 JSON 路径
  * @param {boolean} [opts.forceRescan] - 忽略已有文件列表，强制重新扫描
+ * @param {boolean} [opts.allowIncompleteScan] - 仅调试使用；允许扫描存在目录异常时返回部分结果
  * @returns {Promise<Array>} 资源列表（含 folder_path 字段）
  */
 export async function scanShimoFiles(page, opts = {}) {
@@ -31,21 +34,10 @@ export async function scanShimoFiles(page, opts = {}) {
     return JSON.parse(fs.readFileSync(opts.fileListPath, 'utf-8'));
   }
 
-  // 2. Try common output locations
-  const commonPaths = [
-    path.join(process.cwd(), 'outputs', 'shimo_file_list.json'),
-    path.join(process.cwd(), '..', 'outputs', 'shimo_file_list.json'),
-  ];
-  for (const p of commonPaths) {
-    if (fs.existsSync(p) && !opts.forceRescan) {
-      console.log(`📂 发现已有文件列表: ${p}`);
-      return JSON.parse(fs.readFileSync(p, 'utf-8'));
-    }
-  }
-
-  // 3. Scan via API (with folder path resolution)
+  // 2. Scan via API (with folder path resolution).
+  // Never auto-load an old output file: callers must explicitly pass fileListPath.
   console.log('🔍 通过石墨 API 扫描文件列表（含文件夹路径）...');
-  const resources = await scanViaApi(page);
+  const resources = await scanViaApi(page, opts);
 
   if (resources.length === 0) {
     throw new Error('无法获取石墨文件列表。请提供 --file-list 参数或确保已登录石墨');
@@ -56,122 +48,148 @@ export async function scanShimoFiles(page, opts = {}) {
 }
 
 // ===== SCAN VIA INTERNAL API =====
-async function scanViaApi(page) {
+async function scanViaApi(page, opts = {}) {
   await page.goto('https://shimo.im/recent', { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(3000);
 
-  // Step 1: Get root folder contents
-  const rootItems = await page.evaluate(async () => {
-    const r = await fetch('https://shimo.im/lizard-api/api/files?folderId=0', { credentials: 'include' });
-    if (!r.ok) return [];
-    return await r.json();
-  });
+  // 根层是特殊入口；只有进入真实文件夹后，才使用 GUID 子项接口。
+  const fetchJson = async (endpoint) => page.evaluate(async url => {
+    const response = await fetch(url, { credentials: 'include' });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    return { status: response.status, ok: response.ok, data, raw: data ? null : text.slice(0, 300) };
+  }, endpoint);
 
-  if (!Array.isArray(rootItems) || rootItems.length === 0) {
-    console.log('   ⚠️ API 均失败，尝试页面提取...');
+  const rootResponse = await fetchJson('https://shimo.im/lizard-api/api/files?folderId=0');
+  const rootItems = rootResponse.data;
+  if (!rootResponse.ok || !Array.isArray(rootItems) || rootItems.length === 0) {
+    console.log(`   ⚠️ 根目录 API 失败（HTTP ${rootResponse.status}），尝试页面提取...`);
     return await extractFromPage(page);
   }
 
-  // Collect folder names and IDs for path resolution
-  const folderNames = new Map();
-  const subFolderIds = [];
-  
-  const supportedTypes = ['newdoc', 'mosheet', 'sheet', 'mindmap', 'modoc', 'presentation', 'table'];
-
-  for (const item of rootItems) {
-    if (item.isFolder && item.id) {
-      folderNames.set(String(item.id), { name: item.name || '(未命名)', parent_id: item.parent_id || item.parentId });
-      subFolderIds.push(item.id);
-    }
-  }
-
-  // Step 2: Fetch ALL subfolders in parallel
-  const subResults = await page.evaluate(async (folderIds) => {
-    const results = {};
-    const promises = folderIds.map(async (fid) => {
-      try {
-        const r = await fetch(`https://shimo.im/lizard-api/api/files?folderId=${fid}`, { credentials: 'include' });
-        if (r.ok) {
-          results[fid] = await r.json();
-        } else {
-          results[fid] = [];
-        }
-      } catch { results[fid] = []; }
-    });
-    await Promise.all(promises);
-    return results;
-  }, subFolderIds);
-
-  // Step 3: Build complete file list with folder paths
   const allItems = [];
   const seenFileGuids = new Set();
-  const processedFolders = new Set();
-  const isShortcut = (item) => Boolean(item.isShortcut || item.shortcut || item.shortcutGuid || item.sourceGuid || item.source_guid);
-  const getFileGuid = (item) => item.guid || item.fileGuid || item.file_guid || '';
-  const processItems = (items, parentPath, folderId) => {
-    const fid = String(folderId);
-    if (processedFolders.has(fid)) return; // Prevent infinite recursion
-    processedFolders.add(fid);
-    
-    for (const item of Array.isArray(items) ? items : []) {
-      if (!item || isShortcut(item)) continue;
-      
-      if (item.isFolder && item.id) {
-        folderNames.set(String(item.id), { name: item.name || '(未命名)', parent_id: item.parent_id || item.parentId });
-        // Also add any deeper subfolder results if they exist
-        if (subResults[item.id]) {
-          const subPath = parentPath ? `${parentPath}/${item.name}` : (item.name || '(未命名)');
-          processItems(subResults[item.id], subPath, item.id);
-        }
+  const seenFolderGuids = new Set();
+  const folderNames = new Map();
+  const errors = [];
+  const parentMismatches = [];
+  const shortcuts = [];
+  const supportedTypes = ['newdoc', 'mosheet', 'sheet', 'mindmap', 'modoc', 'presentation', 'table', 'form', 'board'];
+
+  const getGuid = item => String(item?.guid || item?.fileGuid || item?.file_guid || '');
+  const getFolderKey = item => getGuid(item) || String(item?.id || '');
+  const getParentId = item => item?.parentId ?? item?.parent_id ?? null;
+  const isFolder = item => Boolean(item?.isFolder ?? item?.is_folder);
+  const isShortcut = item => Boolean(
+    item?.isShortcut || item?.is_shortcut || item?.shortcut || item?.shortcutGuid ||
+    item?.shortcut_guid || item?.sourceGuid || item?.source_guid || item?.type === 'shortcut'
+  );
+
+  const rememberFolder = (item, parentPath) => {
+    const key = getFolderKey(item);
+    if (!key) return;
+    folderNames.set(key, {
+      name: item.name || item.title || '(未命名)',
+      parent_id: getParentId(item),
+      path: parentPath || '',
+    });
+  };
+
+  const processItems = async (items, currentFolder, currentPath) => {
+    for (const rawItem of Array.isArray(items) ? items : []) {
+      const item = rawItem || {};
+      if (isShortcut(item)) {
+        shortcuts.push({ ...item, observed_in: currentPath });
         continue;
       }
 
-      const guid = getFileGuid(item);
-      if (guid && supportedTypes.includes(item.type) && !seenFileGuids.has(guid)) {
-        seenFileGuids.add(guid);
-        allItems.push({ ...item, guid, _folder_path: parentPath || '' });
+      const parentId = getParentId(item);
+      const expectedParent = currentFolder ? (currentFolder.id ?? null) : 0;
+      if (parentId !== null && String(parentId) !== String(expectedParent)) {
+        parentMismatches.push({ expectedParentId: expectedParent, observedIn: currentPath, item });
+        continue;
       }
+
+      if (isFolder(item)) {
+        const folderGuid = getGuid(item);
+        if (!folderGuid) {
+          errors.push({ kind: 'folder_missing_guid', observedIn: currentPath, item });
+          continue;
+        }
+        const folderKey = getFolderKey(item);
+        const folderName = item.name || item.title || '(未命名)';
+        const folderPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+        rememberFolder(item, currentPath);
+        if (seenFolderGuids.has(folderKey)) continue;
+        seenFolderGuids.add(folderKey);
+        await walkFolder({ ...item, guid: folderGuid }, folderPath);
+        continue;
+      }
+
+      const guid = getGuid(item);
+      if (!guid || seenFileGuids.has(guid)) continue;
+      // 保留不支持类型，让迁移层统一分类为兜底候选项，而不是在扫描阶段静默丢失。
+      if (item.type && !supportedTypes.includes(String(item.type).toLowerCase())) {
+        console.log(`   ℹ️ 保留未识别类型文件: ${item.name || item.title || guid} (${item.type})`);
+      }
+      seenFileGuids.add(guid);
+      allItems.push({ ...item, guid, _folder_path: currentPath || '' });
     }
   };
 
-  processItems(rootItems, '', 0);
-
-  console.log(`   ✅ API /lizard-api/api/files: ${allItems.length} 个文件`);
-
-  // Normalize
-  const normalizedFiles = allItems.map(item => {
-    let folderPath = item._folder_path || '';
-    if (!folderPath && (item.parent_id || item.parentId)) {
-      const pid = String(item.parent_id || item.parentId);
-      if (pid !== '0' && folderNames.has(pid)) {
-        const parts = [];
-        let current = pid;
-        while (current && folderNames.has(current)) {
-          const f = folderNames.get(current);
-          parts.unshift(f.name);
-          current = f.parent_id ? String(f.parent_id) : null;
-        }
-        folderPath = parts.join('/');
-      }
+  const walkFolder = async (folder, folderPath) => {
+    const response = await fetchJson(`https://shimo.im/lizard-api/files?folder=${encodeURIComponent(folder.guid)}`);
+    if (!response.ok || !Array.isArray(response.data)) {
+      errors.push({ kind: 'folder_listing_failed', folder: { guid: folder.guid, id: folder.id, name: folder.name, path: folderPath }, status: response.status, raw: response.raw });
+      return;
     }
+    await processItems(response.data, folder, folderPath);
+  };
 
-    return {
-      name: item.name || item.title || '未命名',
-      type: item.type || 'unknown',
-      size: item.fileSize || item.size || 0,
-      guid: item.guid || '',
-      url: item.url || item.link || '',
-      updatedAt: item.updatedAt || item.updated_at || '',
-      createdAt: item.createdAt || item.created_at || '',
-      teamId: item.teamId || item.team_id || null,
-      space_id: item.teamId || item.team_id ? String(item.teamId || item.team_id) : 'personal',
-      space_name: item.teamId || item.team_id ? '企业空间' : '个人空间',
-      parent_guid: item.parent_guid || item.parent_id || null,
-      folder_path: folderPath,
-    };
-  });
+  await processItems(rootItems, null, '');
+  if (allItems.length === 0) {
+    console.log('   ⚠️ 正确目录 API 未返回文件，尝试页面提取...');
+    return await extractFromPage(page);
+  }
 
-  return normalizedFiles;
+  console.log(`   ✅ API /lizard-api/files: ${allItems.length} 个文件，${seenFolderGuids.size} 个文件夹，跳过 ${shortcuts.length} 个快捷方式，${errors.length} 个错误`);
+  if (parentMismatches.length) console.log(`   ⚠️ 忽略 ${parentMismatches.length} 个父目录不匹配条目`);
+  if (errors.length || parentMismatches.length) {
+    const auditPath = path.join(process.cwd(), 'outputs', 'migration', 'scan_audit.json');
+    fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+    fs.writeFileSync(auditPath, JSON.stringify({
+      scannedAt: new Date().toISOString(),
+      endpoints: {
+        root: '/lizard-api/api/files?folderId=0',
+        children: '/lizard-api/files?folder=<folderGuid>',
+      },
+      errors,
+      parentMismatches,
+    }, null, 2));
+    console.log(`   ⚠️ 扫描审计异常已保存: ${auditPath}`);
+    if (!opts.allowIncompleteScan) {
+      throw new Error(`石墨目录扫描不完整：${errors.length} 个目录读取错误，${parentMismatches.length} 个父目录不匹配。已停止生成迁移计划，请检查 ${auditPath}`);
+    }
+  }
+
+  return allItems.map(item => ({
+    name: item.name || item.title || '未命名',
+    type: item.type || 'unknown',
+    size: item.fileSize || item.size || 0,
+    guid: item.guid || '',
+    url: item.url || item.link || '',
+    updatedAt: item.updatedAt || item.updated_at || '',
+    createdAt: item.createdAt || item.created_at || '',
+    teamId: item.teamId || item.team_id || null,
+    space_id: item.teamId || item.team_id ? String(item.teamId || item.team_id) : 'personal',
+    space_name: item.teamId || item.team_id ? '企业空间' : '个人空间',
+    parent_guid: item.parent_guid || item.parentGuid || item.parent_id || item.parentId || null,
+    folder_path: item._folder_path || '',
+    _scan_errors: errors.length,
+    _parent_mismatches: parentMismatches.length,
+    _shortcuts_skipped: shortcuts.length,
+  }));
 }
 
 // ===== RESOLVE FOLDER MAP =====

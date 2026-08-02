@@ -11,7 +11,7 @@ When a user sends the GitHub URL to an agent:
 3. Clone or download the whole repository into a local skill/tools directory.
 4. Run `npm run setup` from the repository root.
 5. Run `npm run doctor` and explain any missing prerequisites.
-6. Ask the user to provide Feishu app credentials locally in `migration.config.json` or via CLI flags. Never print secrets.
+6. Use the default official CLI backend: run `npx lark-cli auth login --domain drive,docs`, then verify with `npx lark-cli auth status --verify --json`. Never print or extract token values.
 7. Run `npm run login` and ask the user to finish Shimo login in the opened browser.
 8. Ask the user for migration scope and Feishu destination in natural language.
 9. Run a dry run（预演：只生成迁移计划，不导出、不上传、不写飞书）first.

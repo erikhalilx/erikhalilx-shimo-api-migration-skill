@@ -2,9 +2,9 @@
 /**
  * fallback_migrate.mjs — type-specific Feishu docx fallback.
  *
- * The fallback document always includes the original Shimo link and failure reason.
- * For document-like files it tries to export/upload a PDF reference.
- * For mindmap/sheet/other files it captures a screenshot and uploads it as a cloud file reference.
+ * Every successful fallback includes the original Shimo link and at least one
+ * readable reference artifact (PDF or screenshot). A metadata-only docx is
+ * returned as a failure, not as fallback success.
  */
 
 import fs from 'fs';
@@ -20,16 +20,47 @@ function isDocumentLike(type) {
   return ['newdoc', 'modoc', 'document', 'doc', 'docs'].includes(String(type || '').toLowerCase());
 }
 
-function screenshotExtension() { return 'png'; }
-
-async function captureScreenshot({ page, guid, name, outputDir }) {
+async function captureScreenshot({ page, guid, shimoUrl: sourceUrl, name, outputDir }) {
   const safeName = sanitizeName(name);
   const filePath = path.join(outputDir, `${safeName}_${guid}_fallback.png`);
-  const url = shimoUrl(guid);
+  const url = sourceUrl || shimoUrl(guid);
+  if (!url) throw new Error('No usable Shimo source URL for screenshot fallback.');
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(5000);
   await page.screenshot({ path: filePath, fullPage: true });
+  const stat = fs.statSync(filePath);
+  if (stat.size <= 100) throw new Error('Fallback screenshot is empty or invalid.');
   return filePath;
+}
+
+async function uploadScreenshot({ task, page, folderToken, outputDir, lines, artifacts }) {
+  try {
+    const shotPath = await captureScreenshot({
+      page,
+      guid: task.guid,
+      shimoUrl: task.shimo_url,
+      name: task.name,
+      outputDir,
+    });
+    const uploaded = await uploadFile({
+      filePath: shotPath,
+      folderToken,
+      name: `${task.name} fallback screenshot`,
+      fileExtension: 'png',
+      objType: null,
+      mimeType: 'image/png',
+    });
+    if (!uploaded.success) {
+      lines.push(`Fallback screenshot upload failed: ${uploaded.error}`);
+      return false;
+    }
+    artifacts.push({ type: 'screenshot', token: uploaded.token, url: uploaded.url, method: uploaded.method });
+    lines.push(`Fallback screenshot uploaded: ${uploaded.url}`);
+    return true;
+  } catch (error) {
+    lines.push(`Fallback screenshot failed: ${error.message}`);
+    return false;
+  }
 }
 
 export async function runFallbackMigration({ task, page, context, folderToken, outputDir, classification, failureReason }) {
@@ -77,29 +108,26 @@ export async function runFallbackMigration({ task, page, context, folderToken, o
     } else {
       lines.push(`PDF fallback export failed: ${pdfResult.error}`);
     }
-  } else {
-    try {
-      const shotPath = await captureScreenshot({ page, guid: task.guid, name: task.name, outputDir });
-      const uploaded = await uploadFile({
-        filePath: shotPath,
-        folderToken,
-        name: `${task.name} fallback screenshot`,
-        fileExtension: screenshotExtension(),
-        objType: null,
-        mimeType: 'image/png',
-      });
-      if (uploaded.success) {
-        artifacts.push({ type: 'screenshot', token: uploaded.token, url: uploaded.url, method: uploaded.method });
-        lines.push(`Fallback screenshot uploaded: ${uploaded.url}`);
-      } else {
-        lines.push(`Fallback screenshot upload failed: ${uploaded.error}`);
-      }
-    } catch (e) {
-      lines.push(`Fallback screenshot failed: ${e.message}`);
+    if (artifacts.length === 0) {
+      lines.push('PDF fallback was unavailable; attempting screenshot fallback.');
+      await uploadScreenshot({ task, page, folderToken, outputDir, lines, artifacts });
     }
+  } else {
+    await uploadScreenshot({ task, page, folderToken, outputDir, lines, artifacts });
   }
 
   await addDocxTextBlocks(doc.document_id, lines);
+  if (artifacts.length === 0) {
+    return {
+      success: false,
+      error: 'Fallback docx was created, but no readable PDF or screenshot reference could be uploaded.',
+      token: doc.token,
+      url: doc.url,
+      method: 'fallback_docx_incomplete',
+      artifacts,
+      classification,
+    };
+  }
   return {
     success: true,
     token: doc.token,

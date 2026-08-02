@@ -174,6 +174,18 @@ async function createNestedFolders(files, folderMap, outputDir) {
       continue;
     }
 
+    const creationStartedAt = new Date().toISOString();
+    folderMap.nested[key] = {
+      space_id: sid,
+      folder_path: segment,
+      feishu_folder_token: null,
+      feishu_parent_token: parentToken,
+      name: folderName,
+      status: 'creating',
+      creation_started_at: creationStartedAt,
+    };
+    await saveFolderMap(folderMap, outputDir);
+
     try {
       const result = await createFolder({ name: folderName, parentToken });
       folderMap.nested[key] = {
@@ -188,7 +200,22 @@ async function createNestedFolders(files, folderMap, outputDir) {
       created++;
       await saveFolderMap(folderMap, outputDir);
     } catch (e) {
-      if (e.message?.includes('folder_exists')) {
+      const recovered = await recoverRecentlyCreatedFolder(parentToken, folderName, creationStartedAt).catch(() => null);
+      if (recovered) {
+        folderMap.nested[key] = {
+          space_id: sid,
+          folder_path: segment,
+          feishu_folder_token: recovered.token,
+          feishu_parent_token: parentToken,
+          name: folderName,
+          status: 'recovered_after_cli_error',
+          creation_started_at: creationStartedAt,
+          recovered_at: new Date().toISOString(),
+        };
+        created++;
+        await saveFolderMap(folderMap, outputDir);
+        console.log(`   ⚠️ CLI 返回异常后已从飞书目录列表恢复: ${key}`);
+      } else if (e.message?.includes('folder_exists')) {
         const existing = await findChildFolder(parentToken, folderName);
         if (existing) {
           folderMap.nested[key] = {
@@ -206,8 +233,14 @@ async function createNestedFolders(files, folderMap, outputDir) {
         await saveFolderMap(folderMap, outputDir);
       } else {
         console.log(`   ❌ 创建文件夹失败: ${key} — ${e.message}`);
+        throw new Error(`Folder tree creation blocked at ${key}: ${e.message}`);
       }
     }
+  }
+
+  const unresolved = sortedSegments.filter(key => !folderMap.nested[key]?.feishu_folder_token);
+  if (unresolved.length > 0) {
+    throw new Error(`Folder tree incomplete: ${unresolved.length} folders have no Feishu token; first unresolved: ${unresolved[0]}`);
   }
 
   console.log(`   ✅ 创建 ${created} 个, 跳过 ${skipped} 个`);
@@ -218,11 +251,14 @@ async function createNestedFolders(files, folderMap, outputDir) {
  * 根据文件的 space_id 和 folder_path 确定飞书目标文件夹 token
  */
 export function getTargetFolderToken(file, folderMap) {
-  // If file has a folder_path, look up the nested folder token
+  // Files with a real nested path must never fall back to the space or migration root.
   if (file.folder_path && file.folder_path.length > 0) {
     const key = makeNestedKey(file.space_id || 'unknown', file.folder_path);
     const token = folderMap.nested?.[key]?.feishu_folder_token || folderMap.nested?.[file.folder_path]?.feishu_folder_token;
     if (token) return token;
+    throw new Error(
+      `Missing Feishu folder mapping for ${key}; refusing to place "${file.name || file.guid || 'unknown file'}" in a higher-level folder`,
+    );
   }
 
   // If file has parent_guid that maps to a created folder
@@ -283,6 +319,20 @@ function makeNestedKey(spaceId, folderPath) {
 
 async function findChildFolder(parentToken, name) {
   const listed = await listFolderChildren(parentToken || '');
-  if (!listed.success) return null;
+  if (!listed.success) throw new Error(`Failed to list Feishu folder children: ${listed.error}`);
   return listed.files.find(f => f.name === name && (f.type === 'folder' || f.file_type === 'folder')) || null;
+}
+
+async function recoverRecentlyCreatedFolder(parentToken, name, creationStartedAt) {
+  const listed = await listFolderChildren(parentToken || '');
+  if (!listed.success) throw new Error(`Failed to list Feishu folder children during recovery: ${listed.error}`);
+  const startedSeconds = Math.floor(new Date(creationStartedAt).getTime() / 1000) - 5;
+  const candidates = listed.files
+    .filter(f => f.name === name && (f.type === 'folder' || f.file_type === 'folder'))
+    .filter(f => {
+      const createdSeconds = Number(f.created_time || f.created_at || 0);
+      return Number.isFinite(createdSeconds) && createdSeconds >= startedSeconds;
+    })
+    .sort((a, b) => Number(a.created_time || 0) - Number(b.created_time || 0));
+  return candidates[0] || null;
 }

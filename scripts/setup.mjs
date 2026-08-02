@@ -68,16 +68,18 @@ function ensureConfig() {
     throw new Error('migration.config.example.json not found.');
   }
   copyFileSync(examplePath, configPath);
-  log('Created local migration.config.json from migration.config.example.json. Fill in your own Feishu/Lark credentials locally.');
+  log('Created local migration.config.json from migration.config.example.json. Official lark-cli user authorization is the default Feishu/Lark backend.');
 }
 
 function printNextSteps() {
   log('\nSetup completed. Next steps:');
   log('1. Run npm run doctor');
-  log('2. Fill migration.config.json with your Feishu/Lark app_id and app_secret');
-  log('3. Run npm run login and complete Shimo login in the browser');
-  log('4. Ask your agent to guide migration scope and Feishu/Lark destination selection');
-  log('5. Run dry run first; do not start real migration before explicit confirmation');
+  log('2. Run npx lark-cli auth login --domain drive,docs to authorize the current Feishu/Lark user');
+  log('3. Run npx lark-cli auth status --verify --json to verify authorization');
+  log('4. Run npm run login and complete Shimo login in the browser');
+  log('5. Ask your agent to guide migration scope and Feishu/Lark destination selection');
+  log('6. Run dry run first; do not start real migration before explicit confirmation');
+  log('Legacy only: use --feishu-backend oauth and local app_id/app_secret if you intentionally need the built-in OAuth backend.');
 }
 
 try {

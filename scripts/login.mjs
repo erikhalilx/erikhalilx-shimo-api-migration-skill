@@ -9,6 +9,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 
 let loginOptions = {
   cacheDir: path.join(process.cwd(), '.cache', 'shimo-api-migration'),
@@ -22,8 +23,37 @@ function getShimoCacheDir() {
   return path.join(loginOptions.cacheDir || path.join(process.cwd(), '.cache', 'shimo-api-migration'), 'shimo');
 }
 
+function getActiveSessionPointerPath() {
+  return path.join(getShimoCacheDir(), 'active-session.json');
+}
+
+function readActiveSessionName() {
+  const pointerPath = getActiveSessionPointerPath();
+  if (!fs.existsSync(pointerPath)) return 'browser-session';
+  try {
+    const parsed = JSON.parse(fs.readFileSync(pointerPath, 'utf8'));
+    return typeof parsed?.session_name === 'string' && parsed.session_name
+      ? parsed.session_name
+      : 'browser-session';
+  } catch {
+    return 'browser-session';
+  }
+}
+
 export function getShimoSessionDir() {
-  return path.join(getShimoCacheDir(), 'browser-session');
+  return path.join(getShimoCacheDir(), readActiveSessionName());
+}
+
+function createFreshSessionDir() {
+  const sessionName = `browser-session-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  return { sessionName, sessionDir: path.join(getShimoCacheDir(), sessionName) };
+}
+
+function activateSession(sessionName) {
+  fs.writeFileSync(getActiveSessionPointerPath(), JSON.stringify({
+    session_name: sessionName,
+    activated_at: new Date().toISOString(),
+  }, null, 2));
 }
 
 function getCookiePath() {
@@ -52,32 +82,38 @@ export async function isSessionValid(options = {}) {
   const sessionDir = getShimoSessionDir();
   if (!fs.existsSync(sessionDir)) return false;
 
-  try {
-    const context = await chromium.launchPersistentContext(sessionDir, {
-      headless: true,
-      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
-    });
-    const page = context.pages()[0] || await context.newPage();
-    await page.goto('https://shimo.im/recent', { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await sleep(2000);
-    const user = await checkLoginStatus(page);
-    await context.close();
-    return user !== null;
-  } catch {
-    return false;
+  const attempts = Math.max(1, Number(options.validationAttempts || 3));
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let context;
+    try {
+      context = await chromium.launchPersistentContext(sessionDir, {
+        headless: true,
+        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+      });
+      const page = context.pages()[0] || await context.newPage();
+      await page.goto('https://shimo.im/recent', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await sleep(1500);
+      const user = await checkLoginStatus(page);
+      if (user !== null) return true;
+    } catch (error) {
+      if (attempt === attempts) {
+        console.warn(`   ⚠️ Shimo session validation failed after ${attempts} attempts: ${error.message}`);
+      }
+    } finally {
+      await context?.close().catch(() => {});
+    }
+    if (attempt < attempts) await sleep(1500);
   }
+  return false;
 }
 
 // ===== INTERACTIVE LOGIN =====
 export async function interactiveLogin(account = '', password = '', options = {}) {
   configureLogin(options);
   const cacheDir = getShimoCacheDir();
-  const sessionDir = getShimoSessionDir();
+  const { sessionName, sessionDir } = createFreshSessionDir();
   const cookiePath = getCookiePath();
   fs.mkdirSync(cacheDir, { recursive: true });
-
-  fs.rmSync(sessionDir, { recursive: true, force: true });
-  fs.rmSync(cookiePath, { force: true });
 
   console.log('══════════════════════════════════════════════════════');
   console.log('  Shimo interactive login');
@@ -169,6 +205,7 @@ export async function interactiveLogin(account = '', password = '', options = {}
 
     const cookies = await context.cookies();
     fs.writeFileSync(cookiePath, JSON.stringify(cookies, null, 2));
+    activateSession(sessionName);
 
     console.log('\n══════════════════════════════════════════════════════');
     console.log('  ✅ Login successful');

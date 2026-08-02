@@ -1,10 +1,21 @@
 # Feishu Upload Strategies
 
-This project uses Feishu OAuth `user_access_token`. Files and folders are created as the currently authorized user, not as a bot or tenant application owner.
+The default write backend is the official `lark-cli` using the currently authorized Feishu/Lark user. The migration process invokes the CLI as a subprocess and does not extract its stored access or refresh tokens. Files and folders are created as the authorized user, not as a bot or tenant application owner.
 
-Do not commit real `app_id`, `app_secret`, access tokens, refresh tokens, folder tokens, cookies, or migration reports.
+Authorize and verify:
 
-## Strategy Selection
+```bash
+npx lark-cli auth login --domain drive,docs
+npx lark-cli auth status --verify --json
+```
+
+The legacy built-in OAuth HTTP implementation remains available only through explicit `--feishu-backend oauth` selection. Do not commit real `app_id`, `app_secret`, access tokens, refresh tokens, folder tokens, cookies, or migration reports.
+
+## Default lark-cli Operations
+
+The adapter uses official commands for folder listing/creation, file upload/import, document creation/update, and remote inspection. Import failure falls back to preserving the export as a normal Drive file. File arguments are passed relative to a subprocess working directory because the CLI rejects unsafe paths outside its working directory.
+
+## Legacy OAuth HTTP Strategy Selection
 
 | File size | Strategy | API | Result |
 |---|---|---|---|
@@ -117,9 +128,9 @@ Authorization: Bearer {user_access_token}
 - `job_status = 1` or `2`: failed
 - `job_status = 3`: in progress
 
-## OAuth Credentials
+## Legacy OAuth Credentials
 
-Users must create their own Feishu app and put credentials in `migration.config.json`:
+Only users who explicitly choose `--feishu-backend oauth` must create their own Feishu app and put credentials in `migration.config.json`:
 
 ```json
 {

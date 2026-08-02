@@ -1,6 +1,6 @@
 # shimo-api-migration
 
-Agent-first Skill for migrating Shimo documents to Feishu/Lark Drive using Shimo internal export APIs and Feishu/Lark OAuth user authorization.
+Agent-first Skill for migrating Shimo documents to Feishu/Lark Drive using Shimo internal export APIs and the official `lark-cli` user authorization backend.
 
 > Disclaimer: this is not an official Shimo or Feishu/Lark tool. It relies on Shimo internal export endpoints that may change without notice. Use it only for content you own or are authorized to migrate.
 
@@ -9,6 +9,8 @@ Agent-first Skill for migrating Shimo documents to Feishu/Lark Drive using Shimo
 `shimo-api-migration` 是一个面向 Codex、Claude Code、WorkBuddy、Trae 等 agent 工具的 Skill-first 石墨到飞书迁移工具。推荐使用方式不是先敲 CLI，而是把 GitHub 项目链接交给 agent，让 agent 安装整个仓库，读取 `SKILL.md`，再通过对话引导用户完成安装、自检、飞书配置、石墨登录、迁移范围确认、飞书落地位置确认、dry run（预演：只生成迁移计划，不导出、不上传、不写飞书）、真实迁移、resume（断点续跑）、retry（重试）和 fallback（兜底迁移）决策。
 
 CLI 是稳定执行内核；对话式 Skill 工作流是主要产品入口。
+
+扫描完整性说明：全账号扫描必须使用石墨根目录入口读取根层条目，并使用真实文件夹 GUID 子项接口递归子目录；扫描器会校验直接父目录、过滤快捷方式并按文件 GUID 去重。旧的自动生成文件清单不会被静默复用，只有用户为当前任务明确提供 `--file-list` 时才会使用。任何扫描错误或父目录不匹配都会在正常模式下终止迁移计划；部分扫描结果只允许用于调试，不能被描述为“全账号完整扫描”。
 
 ## Install as an Agent Skill
 
@@ -32,7 +34,7 @@ Ask the agent to install it as a local Skill. The agent should:
 2. Read `SKILL.md` first.
 3. Run `npm run setup`.
 4. Run `npm run doctor`.
-5. Guide the user through Feishu/Lark app setup, Shimo login, migration scope confirmation, dry run（预演）, and explicit confirmation before real migration.
+5. Guide the user through official `lark-cli` user authorization, Shimo login, migration scope confirmation, dry run（预演）, and explicit confirmation before real migration.
 
 Important: `npm install shimo-api-migration` installs the CLI package only. It does not automatically register this Skill in every agent tool. For conversational Skill use, install or import the whole GitHub repository.
 
@@ -46,7 +48,7 @@ Use this flow for Codex, Claude Code, WorkBuddy, Trae, and similar agent tools:
 2. Ask the agent to review `README.md`, `SKILL.md`, `INSTALL.md`, and `AGENTS.md`.
 3. Ask the agent to install or import the whole repository as a Skill/tool package.
 4. Ask the agent to run `npm run setup` and `npm run doctor`.
-5. Continue through conversation: Feishu/Lark setup, Shimo login, scope confirmation, destination confirmation, dry run（预演）, and explicit confirmation before real migration.
+5. Continue through conversation: official `lark-cli` user authorization, Shimo login, scope confirmation, destination confirmation, dry run（预演）, and explicit confirmation before real migration.
 
 ### WorkBuddy Installation
 
@@ -125,19 +127,21 @@ CLI-only installation does not automatically install the agent Skill instruction
 - Full-account Shimo scan with folder-path preservation.
 - Natural-language scope support via deterministic include/exclude resolver.
 - Feishu/Lark folder tree creation under a user-selected parent folder or My Space root.
-- OAuth `user_access_token`; files are created as the authorized Feishu/Lark user.
+- Official `lark-cli` user authorization by default; files are created as the authorized Feishu/Lark user without the migration process extracting stored access tokens.
 - API export for `newdoc`, `modoc`, `mosheet/sheet`, `mindmap`, and `presentation`.
 - Auto resume when the saved state clearly matches the same task.
 - Automatic second API attempt for supported files after the first failure.
 - Unsupported API types collected as fallback candidates without wasting API attempts.
-- Flexible user decisions after report: retry selected files, fallback selected files, skip selected files, or leave unresolved.
+- Evidence-based unmigratable detection: known unsupported types, two independent zero-output export tasks, or two independent completed exports whose download URLs return HTTP 404.
+- Network/browser-context failures remain retryable and never become permanent evidence by themselves.
+- Normal migration continues past proven-unmigratable files; fallback runs only after the normal phase.
 - Observable export logs: taskId, progress samples, downloadUrl state, HTTP status.
-- Failure classifier for repeated export failures.
-- User-approved fallback docx execution.
+- PDF-first fallback for documents with automatic screenshot recovery, using each file's real Shimo URL.
+- Optional generated local migration supervisor with process health, current task/attempt/phase, safe restart, final completion metrics, and unmigratable file links.
 - Local and remote verification after upload.
 - Redacted migration reports plus retry/fallback candidate JSON lists.
 
-Not implemented in v1.0.1: batch concurrency and adaptive global rate-limit scheduling. Migration is intentionally serial for safer folder/document creation.
+Not implemented in v1.1.0: batch concurrency and adaptive global rate-limit scheduling. Migration is intentionally serial for safer folder/document creation.
 
 
 ## Supported Types
@@ -164,17 +168,24 @@ npm run doctor
 
 ## Feishu/Lark Setup
 
-1. Create a Feishu/Lark developer app.
-2. Enable OAuth / web app authorization.
-3. Add redirect URI:
+The default backend is the official `lark-cli`, installed by `npm run setup` as a project dependency. Authorize the current user:
 
-```text
-http://localhost:10700/callback
+```bash
+npx lark-cli auth login --domain drive,docs
+npx lark-cli auth status --verify --json
 ```
 
-4. Add document/drive permissions required for creating folders, uploading files, creating docx documents, and editing docx blocks.
-5. Publish or enable the app so your user can authorize it.
-6. Put your own credentials into local `migration.config.json`.
+If the agent cannot wait for the blocking login command, use device authorization:
+
+```bash
+npx lark-cli auth login --domain drive,docs --no-wait --json
+npx lark-cli auth qrcode "<verification_url>" --output "lark-auth.png"
+npx lark-cli auth login --device-code "<device_code>" --json
+```
+
+The agent should show the verification URL or QR code, wait for the user to authorize, and then verify the status. Do not extract, print, copy, or commit access tokens. `npm run doctor` checks CLI and authorization readiness without printing token values.
+
+The built-in OAuth implementation remains available only as a legacy compatibility backend through `--feishu-backend oauth`; it requires the user's own local `app_id` and `app_secret`.
 
 Never commit `migration.config.json`.
 
@@ -183,9 +194,11 @@ Never commit `migration.config.json`.
 ```json
 {
   "feishu": {
-    "app_id": "cli_xxx",
-    "app_secret": "your_app_secret",
-    "target_root_token": ""
+    "backend": "lark-cli",
+    "lark_cli_path": "lark-cli",
+    "target_root_token": "",
+    "app_id": "",
+    "app_secret": ""
   },
   "root_name": "石墨迁移",
   "output_dir": "outputs/migration",
@@ -217,8 +230,10 @@ For WorkBuddy/Codex/Claude Code/Trae users, the agent should follow `SKILL.md`:
 6. Ask where to place files in Feishu/Lark.
 7. Run dry run（预演：只生成迁移计划，不写飞书）.
 8. Ask for explicit confirmation before real migration.
-9. Auto resume（断点续跑）if interrupted and state is compatible.
-10. Report retry/fallback candidates at the end for flexible user decisions.
+9. Ask on the first run whether to generate the optional local migration supervisor.
+10. Auto resume（断点续跑）if interrupted and state is compatible.
+11. Continue normal migration past files proven unmigratable, then run approved fallback at the end.
+12. Report normal successes, fallback successes, unmigratable files with Shimo links, transient failures, and explicitly skipped files.
 
 Read `references/agent_conversation_workflow.md` for user-facing guidance.
 
@@ -250,13 +265,13 @@ npm run migrate -- --file-list outputs/migration/selected_file_list.json --dry-r
 ## Full Migration
 
 ```bash
-npm run migrate -- --file-list outputs/migration/selected_file_list.json --root-name "石墨迁移"
+npm run migrate -- --file-list outputs/migration/selected_file_list.json --root-name "石墨迁移" --feishu-backend lark-cli
 ```
 
 Or choose an existing Feishu/Lark parent folder:
 
 ```bash
-npm run migrate -- --file-list outputs/migration/selected_file_list.json --target-root <feishu_folder_token> --root-name "石墨迁移"
+npm run migrate -- --file-list outputs/migration/selected_file_list.json --target-root <feishu_folder_token> --root-name "石墨迁移" --feishu-backend lark-cli
 ```
 
 ## Resume / Retry / Fallback
@@ -281,6 +296,16 @@ npm run migrate -- --fallback-mode execute --fallback-candidate-list outputs/mig
 
 The user may choose only some failed files for retry/fallback and skip the rest.
 
+## Optional Local Supervisor
+
+On the first migration run, the agent should ask whether the user wants a local supervisor. Generate it after the output directory and a safe resume runner are known:
+
+```bash
+npm run supervisor -- --migration-dir outputs/migration --runner outputs/migration/run-with-exit-log.mjs --output outputs/migration/migration-supervisor
+```
+
+Start the generated `start-supervisor.command`, then open `http://127.0.0.1:4173`. It displays process health, current task, export attempt, current phase, last activity, normal/fallback success counts, remaining work, and files that could not be migrated by the normal API including their Shimo links. Its restart endpoint refuses duplicate starts and uses only the supplied runner.
+
 ## Reports
 
 Reports are written to `output_dir`:
@@ -290,6 +315,7 @@ Reports are written to `output_dir`:
 - `migration_report.json`
 - `retry_candidates.json`
 - `fallback_candidates.json`
+- `unmigratable_files.json`
 - `folder_map.json`
 
 Feishu/Lark tokens, document/file URLs, fallback artifact tokens, and verification metadata are redacted in reports by default. Candidate lists intentionally keep Shimo GUIDs/links so users can select subsets locally; do not publish real reports or candidate lists.
@@ -298,7 +324,7 @@ Feishu/Lark tokens, document/file URLs, fallback artifact tokens, and verificati
 
 - Tested end-to-end: macOS.
 - Expected to work: Windows and Linux with Node.js >= 20 and Playwright Chromium.
-- Not fully verified in v1.0.1: Windows/Linux end-to-end migration.
+- Not fully verified in v1.1.0: Windows/Linux end-to-end migration.
 
 Read `references/platform_compatibility.md` before claiming Windows/Linux support.
 

@@ -16,7 +16,8 @@ The execution engine is based on:
 - Playwright Chromium
 - standard filesystem/path APIs
 - Shimo web login and export HTTP APIs
-- Feishu/Lark HTTP APIs
+- official `lark-cli` subprocess commands (default backend)
+- Feishu/Lark HTTP APIs (legacy OAuth backend)
 
 The code should avoid OS-specific shell behavior and hard-coded user paths.
 

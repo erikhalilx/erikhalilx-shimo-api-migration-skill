@@ -16,7 +16,7 @@ Ask the agent to:
 2. Read `SKILL.md` first.
 3. Run `npm run setup`.
 4. Run `npm run doctor`.
-5. Guide you through Feishu app setup, Shimo login, migration scope confirmation, dry run（预演）, and real migration confirmation.
+5. Guide you through official `lark-cli` user authorization, Shimo login, migration scope confirmation, dry run（预演）, and real migration confirmation.
 
 Do not install only the npm package if the goal is conversational Skill usage. npm provides the CLI execution engine; this GitHub repository provides the Skill instructions and bundled resources.
 
@@ -63,7 +63,8 @@ CLI-only install does not automatically register this repository as a Skill in e
 - Node.js >= 20
 - npm
 - Playwright Chromium, installed by setup/postinstall
-- A Feishu/Lark developer app with OAuth permissions
+- Official `lark-cli`, installed as a project dependency by `npm run setup`
+- Feishu/Lark user authorization completed with `npx lark-cli auth login --domain drive,docs`
 - A Shimo account the user is authorized to migrate
 
 ## Verify installation

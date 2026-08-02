@@ -23,7 +23,8 @@ export async function generateReport(outputDir, options = {}) {
   const successSize = tasks.filter(t => t.status === 'success').reduce((sum, t) => sum + (t.file_size || 0), 0);
   const retryCandidates = tasks.filter(t => t.status === 'failed' || t.status === 'verification_failed');
   const fallbackCandidates = tasks.filter(t => t.status === 'fallback_candidate');
-  const md = generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandidates, fallbackCandidates, totalSize, successSize, runId: state.runId, showTokens: options.showTokens });
+  const unmigratableTasks = tasks.filter(t => t.status === 'skipped_unmigratable' || t.unmigratable || (t.export_method === 'fallback' && t.failure_classification));
+  const md = generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandidates, fallbackCandidates, unmigratableTasks, totalSize, successSize, runId: state.runId, showTokens: options.showTokens });
   const json = {
     run_id: state.runId,
     generated_at: new Date().toISOString(),
@@ -35,6 +36,7 @@ export async function generateReport(outputDir, options = {}) {
     success_size_bytes: successSize,
     retry_candidates: retryCandidates.map(candidateRecord),
     fallback_candidates: fallbackCandidates.map(candidateRecord),
+    unmigratable_files: unmigratableTasks.map(candidateRecord),
     tasks: tasks.map(t => ({
       task_id: t.task_id,
       status: t.status,
@@ -59,12 +61,14 @@ export async function generateReport(outputDir, options = {}) {
   const jsonPath = path.join(outputDir, 'migration_report.json');
   const retryPath = path.join(outputDir, 'retry_candidates.json');
   const fallbackPath = path.join(outputDir, 'fallback_candidates.json');
+  const unmigratablePath = path.join(outputDir, 'unmigratable_files.json');
   fs.writeFileSync(mdPath, md);
   fs.writeFileSync(jsonPath, JSON.stringify(json, null, 2));
   fs.writeFileSync(retryPath, JSON.stringify(retryCandidates.map(candidateRecord), null, 2));
   fs.writeFileSync(fallbackPath, JSON.stringify(fallbackCandidates.map(candidateRecord), null, 2));
-  console.log(`\n📊 Reports generated:\n   ${mdPath}\n   ${jsonPath}\n   ${retryPath}\n   ${fallbackPath}`);
-  return { mdPath, jsonPath, retryPath, fallbackPath };
+  fs.writeFileSync(unmigratablePath, JSON.stringify(unmigratableTasks.map(candidateRecord), null, 2));
+  console.log(`\n📊 Reports generated:\n   ${mdPath}\n   ${jsonPath}\n   ${retryPath}\n   ${fallbackPath}\n   ${unmigratablePath}`);
+  return { mdPath, jsonPath, retryPath, fallbackPath, unmigratablePath };
 }
 
 function candidateRecord(t) {
@@ -109,6 +113,7 @@ function summarize(items) {
     fallback_candidate: items.filter(t => t.status === 'fallback_candidate').length,
     skipped: items.filter(t => t.status === 'skipped').length,
     fallback_success: items.filter(t => t.status === 'success' && t.export_method === 'fallback').length,
+    skipped_unmigratable: items.filter(t => t.status === 'skipped_unmigratable').length,
     size_bytes: items.reduce((sum, t) => sum + (t.file_size || 0), 0),
   };
 }
@@ -147,8 +152,8 @@ function redactDeep(value) {
 
 function esc(s) { return String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' '); }
 
-function generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandidates, fallbackCandidates, successSize, runId, showTokens }) {
-  const successRate = summary.total > 0 ? ((summary.success / summary.total) * 100).toFixed(1) : '0.0';
+function generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandidates, fallbackCandidates, unmigratableTasks, successSize, runId, showTokens }) {
+  const processedRate = summary.total > 0 ? (((summary.processed || 0) / summary.total) * 100).toFixed(1) : '0.0';
   const successTasks = tasks.filter(t => t.status === 'success');
   let md = `# Shimo to Feishu Migration Report\n\n`;
   md += `**Run ID**: ${runId}\n`;
@@ -156,7 +161,7 @@ function generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandi
   md += `**Token display**: ${showTokens ? 'full tokens shown by explicit option' : 'redacted by default'}\n\n`;
   md += `## Safety Notice\n\nThis tool is designed to be non-destructive: Shimo source files are read-only, and existing Feishu user files are not deleted or modified. The tool only creates new folders/files/docs in the selected destination.\n\n`;
   md += `## Summary\n\n| Metric | Value |\n|---|---:|\n`;
-  md += `| Total tasks | ${summary.total} |\n| Success | ${summary.success} |\n| Fallback success | ${summary.fallback_success || 0} |\n| Retry candidates | ${retryCandidates.length} |\n| Fallback candidates awaiting decision | ${fallbackCandidates.length} |\n| Failed | ${summary.failed} |\n| Verification failed | ${summary.verification_failed} |\n| Skipped | ${summary.skipped} |\n| Success rate | ${successRate}% |\n| Successful migrated size | ${(successSize / 1024 / 1024).toFixed(1)} MB |\n`;
+  md += `| Total tasks | ${summary.total} |\n| Normal API success | ${(summary.success || 0) - (summary.fallback_success || 0)} |\n| Fallback success | ${summary.fallback_success || 0} |\n| Unmigratable by normal API | ${summary.unmigratable_total || summary.skipped_unmigratable || 0} |\n| Retry candidates | ${retryCandidates.length} |\n| Fallback candidates awaiting decision | ${fallbackCandidates.length} |\n| Failed | ${summary.failed} |\n| Verification failed | ${summary.verification_failed} |\n| Explicitly skipped | ${Math.max((summary.skipped || 0) - (summary.skipped_unmigratable || 0), 0)} |\n| Processed rate | ${processedRate}% |\n| Successful migrated size | ${(successSize / 1024 / 1024).toFixed(1)} MB |\n`;
 
   md += `\n## By Type\n\n| Type | Total | Success | Fallback | Retry Candidates | Fallback Candidates | Verification Failed | Skipped | Size |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n`;
   for (const [type, items] of Object.entries(byType)) {
@@ -194,6 +199,13 @@ function generateMarkdown({ summary, byType, bySpace, byError, tasks, retryCandi
     md += `\n## Fallback Candidates Awaiting User Decision (${fallbackCandidates.length})\n\n| # | Type | Name | Shimo Link | Classification | Suggested Options | Reason |\n|---:|---|---|---|---|---|---|\n`;
     fallbackCandidates.forEach((t, i) => {
       md += `| ${i + 1} | ${esc(t.type)} | ${esc(t.name)} | ${esc(t.shimo_url)} | ${esc(t.failure_classification?.category || t.error?.category)} | ${esc((t.action_required?.options || []).join('/'))} | ${esc(t.error?.reason || t.error?.message || '')} |\n`;
+    });
+  }
+
+  if (unmigratableTasks.length > 0) {
+    md += `\n## Unmigratable by Normal API (${unmigratableTasks.length})\n\n| # | Type | Name | Shimo Path | Shimo Link | Classification | Reason |\n|---:|---|---|---|---|---|---|\n`;
+    unmigratableTasks.forEach((t, i) => {
+      md += `| ${i + 1} | ${esc(t.type)} | ${esc(t.name)} | ${esc(t.shimo_path)} | ${esc(t.shimo_url)} | ${esc(t.failure_classification?.category || t.error?.category)} | ${esc(t.unmigratable?.reason || t.error?.reason || t.error?.message || '')} |\n`;
     });
   }
 

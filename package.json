@@ -1,6 +1,6 @@
 {
   "name": "shimo-api-migration",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Agent-first Skill and CLI for migrating Shimo documents to Feishu/Lark Drive using Shimo export APIs.",
   "type": "module",
   "bin": {
@@ -15,6 +15,11 @@
     "login": "node scripts/login.mjs",
     "migrate": "node scripts/migrate.mjs",
     "scope": "node scripts/scope_resolver.mjs",
+    "supervisor": "node scripts/create_supervisor.mjs",
+    "test:scan": "node scripts/scan_regression_test.mjs",
+    "test:feishu-cli": "node scripts/feishu_upload_lark_cli_test.mjs",
+    "test:classifier": "node scripts/failure_classifier_test.mjs",
+    "test:state": "node scripts/state_test.mjs",
     "check": "node --check scripts/*.mjs",
     "postinstall": "npx playwright install chromium"
   },
@@ -55,6 +60,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@larksuite/cli": "^1.0.80",
     "playwright": "^1.61.1"
   }
 }

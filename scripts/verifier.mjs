@@ -13,6 +13,17 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { getDocxMeta, getFileMeta, getSheetMeta } from './feishu_upload.mjs';
 
+function readPrefix(filePath, length = 8) {
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const bytesRead = fs.readSync(fd, buffer, 0, length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // ===== VERIFY EXPORT FILE =====
 /**
  * 验证导出的本地文件
@@ -127,8 +138,8 @@ function validateZip(filePath, expectedType) {
     }
   } catch (e) {
     // unzip not available or file is not a valid zip
-    // Check magic bytes instead
-    const buf = fs.readFileSync(filePath);
+    // Read only the prefix so large exports are never loaded fully into memory.
+    const buf = readPrefix(filePath, 4);
     if (buf[0] !== 0x50 || buf[1] !== 0x4B) { // PK magic
       errors.push(`非 ZIP 格式（magic bytes 检查失败）: ${expectedType}`);
     }
@@ -140,7 +151,7 @@ function validateZip(filePath, expectedType) {
 // ===== IMAGE VALIDATION =====
 function validateImage(filePath, type) {
   const errors = [];
-  const buf = fs.readFileSync(filePath);
+  const buf = readPrefix(filePath, 8);
 
   if (type === 'jpg' || type === 'jpeg') {
     if (buf[0] !== 0xFF || buf[1] !== 0xD8) {
@@ -158,7 +169,7 @@ function validateImage(filePath, type) {
 // ===== PDF VALIDATION =====
 function validatePdf(filePath) {
   const errors = [];
-  const buf = fs.readFileSync(filePath, { start: 0, end: 5 });
+  const buf = readPrefix(filePath, 5);
 
   if (!buf.toString('ascii').startsWith('%PDF')) {
     errors.push('非 PDF 文件（magic bytes 检查失败）');

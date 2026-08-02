@@ -5,6 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { getUserAccessToken, configureAuth } from './auth.mjs';
 
 const BASE_URL = 'https://open.feishu.cn/open-apis';
@@ -13,15 +14,91 @@ const BLOCK_SIZE = 4 * 1024 * 1024;
 
 let appId = null;
 let appSecret = null;
+let backend = 'oauth';
+let larkCliPath = process.env.LARK_CLI_PATH || 'lark-cli';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 export function sanitizeName(name) { return String(name || 'untitled').replace(/[\/\\:*?"<>|]/g, '_').trim() || 'untitled'; }
 
 export function initFeishu(config) {
+  backend = config.backend || config.feishu_backend || config.feishu?.backend || 'oauth';
+  larkCliPath = config.larkCliPath || config.lark_cli_path || process.env.LARK_CLI_PATH || 'lark-cli';
   appId = config.feishu?.app_id || config.app_id;
   appSecret = config.feishu?.app_secret || config.app_secret;
-  if (!appId || !appSecret) throw new Error('Missing Feishu app credentials');
+  if (backend !== 'lark-cli' && (!appId || !appSecret)) throw new Error('Missing Feishu app credentials');
   if (config.cacheDir || config.cache_dir) configureAuth({ cacheDir: config.cacheDir || config.cache_dir });
+}
+
+function runLarkCli(args, { timeout = 180000, cwd = process.cwd() } = {}) {
+  const cliArgs = [...args, '--as', 'user', '--json'];
+  const isNodeScript = /\.(?:cjs|mjs|js)$/i.test(larkCliPath);
+  const command = isNodeScript ? process.execPath : larkCliPath;
+  const commandArgs = isNodeScript ? [larkCliPath, ...cliArgs] : cliArgs;
+  const result = spawnSync(command, commandArgs, {
+    cwd,
+    encoding: 'utf8',
+    timeout,
+    env: { ...process.env, LARK_CLI_NO_PROXY_WARN: '1' },
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  const stdout = String(result.stdout || '').trim();
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch {}
+  if (result.status !== 0 || !parsed?.ok || parsed?.data?.error) {
+    const detail = parsed?.error?.message || parsed?.data?.error || parsed?.message || String(result.stderr || '').trim() || stdout || `exit ${result.status}`;
+    throw new Error(`lark-cli failed: ${detail}`);
+  }
+  return parsed.data || {};
+}
+
+function cliUrl(type, token) {
+  if (!token) return '';
+  if (type === 'docx') return `https://my.feishu.cn/docx/${token}`;
+  if (type === 'sheet') return `https://my.feishu.cn/sheets/${token}`;
+  if (type === 'slides') return `https://my.feishu.cn/slides/${token}`;
+  if (type === 'folder') return `https://my.feishu.cn/drive/folder/${token}`;
+  return `https://my.feishu.cn/drive/file/${token}`;
+}
+
+function firstDefined(...values) {
+  return values.find(value => value !== undefined && value !== null && value !== '');
+}
+
+function normalizeCliObject(data, fallbackType = 'file') {
+  const source = data?.document || data?.file || data?.folder || data?.result || data || {};
+  const type = firstDefined(source.type, source.obj_type, source.token_type, data?.type, fallbackType);
+  const token = firstDefined(
+    source.token,
+    source.document_id,
+    source.file_token,
+    source.folder_token,
+    source.obj_token,
+    data?.token,
+    data?.document_id,
+    data?.file_token,
+    data?.folder_token,
+  );
+  const url = firstDefined(source.url, data?.url, cliUrl(type, token));
+  return { ...source, token, type, url };
+}
+
+function inspectWithCli(token, type) {
+  const data = runLarkCli(['drive', '+inspect', '--url', cliUrl(type, token), '--type', type]);
+  return normalizeCliObject(data, type);
+}
+
+function cliFileArgs(filePath) {
+  const absolute = path.resolve(filePath);
+  return { cwd: path.dirname(absolute), relativePath: `./${path.basename(absolute)}` };
+}
+
+function escapeXmlText(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r?\n/g, '<br/>');
 }
 
 async function getToken() {
@@ -60,21 +137,49 @@ async function feishuApi(method, urlPath, opts = {}) {
 }
 
 export async function getFileMeta(fileToken) {
+  if (backend === 'lark-cli') {
+    try { return { success: true, meta: inspectWithCli(fileToken, 'file') }; }
+    catch (e) { return { success: false, error: e.message }; }
+  }
   const resp = await feishuApi('GET', `/drive/v1/files/${encodeURIComponent(fileToken)}`);
   return resp.data.code === 0 ? { success: true, meta: resp.data.data } : { success: false, error: resp.data.msg || JSON.stringify(resp.data) };
 }
 
 export async function getDocxMeta(documentId) {
+  if (backend === 'lark-cli') {
+    try { return { success: true, meta: inspectWithCli(documentId, 'docx') }; }
+    catch (e) { return { success: false, error: e.message }; }
+  }
   const resp = await feishuApi('GET', `/docx/v1/documents/${encodeURIComponent(documentId)}`);
   return resp.data.code === 0 ? { success: true, meta: resp.data.data } : { success: false, error: resp.data.msg || JSON.stringify(resp.data) };
 }
 
 export async function getSheetMeta(spreadsheetToken) {
+  if (backend === 'lark-cli') {
+    try { return { success: true, meta: inspectWithCli(spreadsheetToken, 'sheet') }; }
+    catch (e) { return { success: false, error: e.message }; }
+  }
   const resp = await feishuApi('GET', `/sheets/v3/spreadsheets/${encodeURIComponent(spreadsheetToken)}`);
   return resp.data.code === 0 ? { success: true, meta: resp.data.data } : { success: false, error: resp.data.msg || JSON.stringify(resp.data) };
 }
 
 export async function listFolderChildren(folderToken = '') {
+  if (backend === 'lark-cli') {
+    const args = ['drive', 'files', 'list', '--page-all', '--page-size', '200'];
+    if (folderToken) args.push('--folder-token', folderToken);
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const data = runLarkCli(args, { timeout: 120000 });
+        const files = (data.files || []).map(file => normalizeCliObject(file, file.type || 'file'));
+        return { success: true, files };
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await sleep(1500);
+      }
+    }
+    return { success: false, error: `lark-cli list folder failed after 2 attempts: ${lastError?.message || 'unknown error'}` };
+  }
   const query = folderToken ? `?folder_token=${encodeURIComponent(folderToken)}&page_size=200` : '?page_size=200';
   const resp = await feishuApi('GET', `/drive/v1/files${query}`);
   return resp.data.code === 0 ? { success: true, files: resp.data.data?.files || [] } : { success: false, error: resp.data.msg || JSON.stringify(resp.data) };
@@ -82,6 +187,13 @@ export async function listFolderChildren(folderToken = '') {
 
 export async function createFolder({ name, parentToken }) {
   const safeName = sanitizeName(name);
+  if (backend === 'lark-cli') {
+    const args = ['drive', '+create-folder', '--name', safeName];
+    if (parentToken) args.push('--folder-token', parentToken);
+    const folder = normalizeCliObject(runLarkCli(args, { timeout: 120000 }), 'folder');
+    if (!folder.token) throw new Error('lark-cli create folder returned no token');
+    return { ...folder, name: safeName, token: folder.token, url: folder.url || cliUrl('folder', folder.token) };
+  }
   const resp = await feishuApi('POST', '/drive/v1/files/create_folder', {
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ name: safeName, folder_type: 'normal', folder_token: parentToken || '' }),
@@ -207,6 +319,29 @@ export async function uploadFile({ filePath, folderToken, name, fileExtension, o
   const fileSize = fs.statSync(filePath).size;
   const ext = fileExtension || path.extname(filePath).slice(1) || 'bin';
   try {
+    if (backend === 'lark-cli') {
+      const { cwd, relativePath } = cliFileArgs(filePath);
+      if (objType) {
+        try {
+          const args = ['drive', '+import', '--file', relativePath, '--name', sanitizeName(name), '--type', objType];
+          if (folderToken) args.push('--folder-token', folderToken);
+          const imported = normalizeCliObject(runLarkCli(args, { cwd, timeout: 30 * 60 * 1000 }), objType);
+          if (!imported.token) throw new Error('lark-cli import returned no token');
+          return { success: true, token: imported.token, token_type: imported.type || objType, url: imported.url || cliUrl(objType, imported.token), method: 'lark_cli_import' };
+        } catch (importError) {
+          const args = ['drive', '+upload', '--file', relativePath, '--name', `${sanitizeName(name)}.${ext}`];
+          if (folderToken) args.push('--folder-token', folderToken);
+          const uploaded = normalizeCliObject(runLarkCli(args, { cwd, timeout: 30 * 60 * 1000 }), 'file');
+          if (!uploaded.token) throw new Error(`lark-cli import failed (${importError.message}); upload fallback returned no token`);
+          return { success: true, token: uploaded.token, token_type: 'file', url: uploaded.url || cliUrl('file', uploaded.token), method: 'lark_cli_upload_fallback', note: `Cloud document import failed; preserved as Drive file: ${importError.message}` };
+        }
+      }
+      const args = ['drive', '+upload', '--file', relativePath, '--name', `${sanitizeName(name)}.${ext}`];
+      if (folderToken) args.push('--folder-token', folderToken);
+      const uploaded = normalizeCliObject(runLarkCli(args, { cwd, timeout: 30 * 60 * 1000 }), 'file');
+      if (!uploaded.token) throw new Error('lark-cli upload returned no token');
+      return { success: true, token: uploaded.token, token_type: 'file', url: uploaded.url || cliUrl('file', uploaded.token), method: 'lark_cli_upload' };
+    }
     if (fileSize <= SMALL_FILE_LIMIT && objType) return await importDirect(filePath, folderToken, name, ext, objType, mimeType);
     const uploadResult = await uploadChunked(filePath, folderToken, name, ext);
     const fileToken = uploadResult.token;
@@ -225,6 +360,14 @@ export async function uploadFile({ filePath, folderToken, name, fileExtension, o
 
 export async function createDocxDocument({ title, folderToken }) {
   const safeTitle = sanitizeName(title).slice(0, 800);
+  if (backend === 'lark-cli') {
+    const args = ['docs', '+create', '--title', safeTitle, '--content', '<p></p>'];
+    if (folderToken) args.push('--parent-token', folderToken);
+    else args.push('--parent-position', 'my_library');
+    const doc = normalizeCliObject(runLarkCli(args), 'docx');
+    if (!doc.token) throw new Error('lark-cli create docx returned no document_id');
+    return { success: true, token: doc.token, document_id: doc.token, url: doc.url || cliUrl('docx', doc.token) };
+  }
   const resp = await feishuApi('POST', '/docx/v1/documents', {
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ title: safeTitle, folder_token: folderToken || '' }),
@@ -236,11 +379,17 @@ export async function createDocxDocument({ title, folderToken }) {
 }
 
 export async function addDocxTextBlocks(documentId, texts) {
-  const children = texts.filter(Boolean).map(content => ({
+  const filtered = texts.filter(Boolean).map(text => String(text));
+  if (filtered.length === 0) return { success: true };
+  if (backend === 'lark-cli') {
+    const content = filtered.map(text => `<p>${escapeXmlText(text)}</p>`).join('');
+    const data = runLarkCli(['docs', '+update', '--doc', documentId, '--command', 'append', '--content', content]);
+    return { success: true, data };
+  }
+  const children = filtered.map(content => ({
     block_type: 2,
-    text: { elements: [{ text_run: { content: String(content) } }], style: {} },
+    text: { elements: [{ text_run: { content } }], style: {} },
   }));
-  if (children.length === 0) return { success: true };
   const resp = await feishuApi('POST', `/docx/v1/documents/${documentId}/blocks/${documentId}/children?document_revision_id=-1`, {
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ index: -1, children: children.slice(0, 50) }),

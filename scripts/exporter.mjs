@@ -53,6 +53,16 @@ export function getExportFormat(fileType) {
   return { supported: true, format: formats[0], normalizedType: normalized };
 }
 
+export function getZeroProgressTimeoutMs() {
+  return 120000;
+}
+
+export function isZeroProgressSample(sample = {}) {
+  return Number(sample.progress || 0) === 0
+    && Number(sample.fileSize || 0) === 0
+    && !sample.downloadUrl;
+}
+
 function downloadFile(url, filePath, cookieStr, observable = {}) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -145,9 +155,13 @@ export async function exportFile({ page, context, guid, fileType, name, outputDi
     if (!taskId) return fail(`no taskId in response: ${JSON.stringify(exportResult.data).slice(0, 300)}`);
 
     const exportTimeout = fileSize ? Math.min(1800000, Math.max(300000, fileSize * 0.5)) : 300000;
+    const zeroProgressTimeout = getZeroProgressTimeoutMs(normalizedType);
     observable.timeout_ms = exportTimeout;
+    observable.zero_progress_timeout_ms = zeroProgressTimeout;
     const maxPolls = Math.ceil(exportTimeout / 2000);
+    const maxZeroProgressPolls = Math.ceil(zeroProgressTimeout / 2000);
     let downloadUrl = null;
+    let consecutiveZeroProgressPolls = 0;
 
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(r => setTimeout(r, 2000));
@@ -167,7 +181,13 @@ export async function exportFile({ page, context, guid, fileType, name, outputDi
         status: data.status || '',
       };
       observable.progress_samples.push(sample);
-      if (observe && (i % 15 === 0 || sample.downloadUrl)) console.log(`      progress=${sample.progress || 0}, downloadUrl=${sample.downloadUrl || 'empty'}, fileSize=${sample.fileSize || 0}`);
+      const hasZeroProgress = isZeroProgressSample(sample);
+      consecutiveZeroProgressPolls = hasZeroProgress ? consecutiveZeroProgressPolls + 1 : 0;
+      if (observe && (i % 15 === 0 || sample.downloadUrl)) {
+        const elapsedSeconds = (i + 1) * 2;
+        const zeroProgressSeconds = consecutiveZeroProgressPolls * 2;
+        console.log(`      progress=${sample.progress || 0}, downloadUrl=${sample.downloadUrl || 'empty'}, fileSize=${sample.fileSize || 0}, status=${sample.status || 'empty'}, costTime=${sample.costTime || 0}, elapsed=${elapsedSeconds}s, zeroProgress=${zeroProgressSeconds}s/${Math.round(zeroProgressTimeout / 1000)}s`);
+      }
       if (data.downloadUrl && data.downloadUrl.length > 10) {
         downloadUrl = data.downloadUrl;
         break;
@@ -177,6 +197,11 @@ export async function exportFile({ page, context, guid, fileType, name, outputDi
         break;
       }
       if (data.status === 'failed' || data.status === 'error') return fail(`export failed: ${JSON.stringify(data).slice(0, 300)}`);
+      if (consecutiveZeroProgressPolls >= maxZeroProgressPolls) {
+        observable.zero_progress_detected = true;
+        observable.zero_progress_polls = consecutiveZeroProgressPolls;
+        return fail(`export stalled: zero progress with empty downloadUrl for ${Math.round(zeroProgressTimeout / 60000)}min`);
+      }
     }
 
     if (!downloadUrl) return fail(`export timeout (${Math.round(exportTimeout / 60000)}min)`);
