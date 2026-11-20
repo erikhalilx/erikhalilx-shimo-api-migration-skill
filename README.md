@@ -1,5 +1,7 @@
 # shimo-api-migration
 
+一款基于 Agent Skill 的石墨文档迁移工具，适用于将个人或团队的石墨文档批量迁移至飞书云盘。支持目录结构保留、迁移预演、断点续传和失败重试。兼容 Codex、WorkBuddy 等 Agent，已在 macOS 完成验证，Windows/Linux 尚待完整验证。
+
 Agent-first Skill for migrating Shimo documents to Feishu/Lark Drive using Shimo internal export APIs and the official `lark-cli` user authorization backend.
 
 > Disclaimer: this is not an official Shimo or Feishu/Lark tool. It relies on Shimo internal export endpoints that may change without notice. Use it only for content you own or are authorized to migrate.
